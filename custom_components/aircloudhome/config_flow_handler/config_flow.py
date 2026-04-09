@@ -222,7 +222,7 @@ class AirCloudHomeConfigFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=get_reauth_schema(entry.data.get(CONF_USERNAME, "")),
             errors=errors,
             description_placeholders={
-                "username": entry.data.get(CONF_USERNAME, ""),
+                "email": entry.data.get(CONF_USERNAME, ""),
             },
         )
 
