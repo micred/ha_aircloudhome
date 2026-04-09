@@ -87,6 +87,9 @@ class AirCloudHomeApiClient:
     """
 
     _BASE_URL = "https://api-global-prod.aircloudhome.com"
+    _WHO_AM_I_URL = f"{_BASE_URL}/iam/user/v2/who-am-i"
+    _FAMILY_GROUPS_URL = f"{_BASE_URL}/iam/family-account/v2/groups"
+    _CLOUD_IDS_URL = f"{_BASE_URL}/rac/ownership/groups/cloudIds/{{family_id}}"
 
     def __init__(
         self,
@@ -187,10 +190,29 @@ class AirCloudHomeApiClient:
 
         response = await self._api_wrapper(
             method="get",
-            url=f"{self._BASE_URL}/iam/family-account/v2/groups",
+            url=self._FAMILY_GROUPS_URL,
             headers={"Authorization": f"Bearer {self._access_token}"},
         )
         return response.get("result", [])
+
+    async def async_get_who_am_i(self) -> dict[str, Any]:
+        """
+        Get the authenticated user profile.
+
+        This endpoint is useful for region-specific APIs where the family ID is
+        exposed directly on the user profile.
+
+        Returns:
+            The decoded JSON response from ``/iam/user/v2/who-am-i``.
+        """
+        await self._async_ensure_valid_token()
+
+        response = await self._api_wrapper(
+            method="get",
+            url=self._WHO_AM_I_URL,
+            headers={"Authorization": f"Bearer {self._access_token}"},
+        )
+        return response if isinstance(response, dict) else {}
 
     async def async_get_idu_list(self, family_id: int) -> list[dict[str, Any]]:
         """
@@ -212,10 +234,13 @@ class AirCloudHomeApiClient:
 
         response = await self._api_wrapper(
             method="get",
-            url=f"{self._BASE_URL}/rac/ownership/groups/{family_id}/idu-list",
+            url=self._CLOUD_IDS_URL.format(family_id=family_id),
             headers={"Authorization": f"Bearer {self._access_token}"},
         )
-        return response if isinstance(response, list) else []
+        devices = self._normalize_device_list(response, family_id)
+        if not devices:
+            LOGGER.warning("Cloud ID response for family %s did not contain device data", family_id)
+        return devices
 
     async def async_control_device(
         self,
@@ -272,6 +297,36 @@ class AirCloudHomeApiClient:
             data=data,
             headers={"Authorization": f"Bearer {self._access_token}"},
         )
+
+    def _normalize_device_list(self, response: Any, family_id: int) -> list[dict[str, Any]]:
+        """
+        Normalize API responses into a list of device dictionaries.
+
+        The Europe API has been observed to return either a list of device
+        dictionaries or a wrapped object with the list nested in ``result`` or
+        ``data``. If only scalar cloud IDs are returned, keep a minimal
+        dictionary so the caller can at least retain the IDs.
+        """
+        candidate: Any = response
+        if isinstance(response, dict):
+            for key in ("result", "data", "cloudIds", "items"):
+                if isinstance(response.get(key), list):
+                    candidate = response[key]
+                    break
+
+        if not isinstance(candidate, list):
+            return []
+
+        devices: list[dict[str, Any]] = []
+        for item in candidate:
+            if isinstance(item, dict):
+                device = dict(item)
+                device.setdefault("familyId", family_id)
+                devices.append(device)
+            elif isinstance(item, (int, str)):
+                devices.append({"id": item, "familyId": family_id})
+
+        return devices
 
     async def _api_wrapper(
         self,

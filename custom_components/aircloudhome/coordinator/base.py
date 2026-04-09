@@ -97,8 +97,13 @@ class AirCloudHomeDataUpdateCoordinator(DataUpdateCoordinator):
             # Fetch family groups
             family_groups = await client.async_get_family_groups()
             if not family_groups:
-                LOGGER.warning("No family groups found for user")
-                return {"devices": []}
+                who_am_i = await client.async_get_who_am_i()
+                family_id = who_am_i.get("familyId")
+                if family_id:
+                    family_groups = [{"familyId": family_id}]
+                else:
+                    LOGGER.warning("No family groups found for user")
+                    return {"devices": []}
 
             # Fetch devices from all family groups
             devices = []
