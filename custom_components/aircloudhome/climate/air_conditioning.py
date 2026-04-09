@@ -8,6 +8,7 @@ from time import monotonic
 from typing import Any
 
 from custom_components.aircloudhome.coordinator import AirCloudHomeDataUpdateCoordinator
+from custom_components.aircloudhome.const import DOMAIN
 from custom_components.aircloudhome.entity import AirCloudHomeEntity
 from custom_components.aircloudhome.entity_utils.climate_mappings import (
     API_FAN_SPEED_TO_HA,
@@ -19,7 +20,7 @@ from custom_components.aircloudhome.entity_utils.climate_mappings import (
     HVAC_MODE_TO_API_MODE,
     PRESET_DRY_COOL,
 )
-from custom_components.aircloudhome.entity_utils.device_info import normalize_serial_number
+from custom_components.aircloudhome.entity_utils.device_info import build_rac_device_info
 from homeassistant.components.climate import ClimateEntity
 from homeassistant.components.climate.const import PRESET_NONE, ClimateEntityFeature, HVACMode
 from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
@@ -85,9 +86,7 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
     def _clear_expired_overrides(self) -> None:
         """Drop optimistic overrides once the API has had enough time to catch up."""
         now = monotonic()
-        expired_keys = [
-            key for key, (_, expires_at) in self._optimistic_overrides.items() if expires_at <= now
-        ]
+        expired_keys = [key for key, (_, expires_at) in self._optimistic_overrides.items() if expires_at <= now]
         for key in expired_keys:
             self._optimistic_overrides.pop(key, None)
 
@@ -95,9 +94,7 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
         """Return the device payload with any active optimistic updates applied."""
         self._clear_expired_overrides()
 
-        resolved_keys = [
-            key for key, (value, _) in self._optimistic_overrides.items() if device.get(key) == value
-        ]
+        resolved_keys = [key for key, (value, _) in self._optimistic_overrides.items() if device.get(key) == value]
         for key in resolved_keys:
             self._optimistic_overrides.pop(key, None)
 
@@ -169,12 +166,10 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
 
     def _get_device_info(self) -> DeviceInfo:
         """Get device information for this AC unit."""
-        return DeviceInfo(
-            identifiers={("aircloudhome", f"{self.coordinator.config_entry.entry_id}_{self._device['id']}")},
-            name=self._device.get("name", f"AC Unit {self._device['id']}"),
-            manufacturer=self._device.get("model"),
-            serial_number=normalize_serial_number(self._device.get("serialNumber")),
-            hw_version=self._device.get("vendorThingId"),
+        return build_rac_device_info(
+            DOMAIN,
+            self.coordinator.config_entry.entry_id,
+            self._device,
         )
 
     @property
@@ -190,8 +185,7 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
             return bool(online)
 
         return any(
-            key in device
-            for key in ("power", "mode", "roomTemperature", "iduTemperature", "fanSpeed", "fanSwing")
+            key in device for key in ("power", "mode", "roomTemperature", "iduTemperature", "fanSpeed", "fanSwing")
         )
 
     @property
