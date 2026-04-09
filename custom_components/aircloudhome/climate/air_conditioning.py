@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from datetime import datetime
+from time import monotonic
 from typing import Any
 
 from custom_components.aircloudhome.coordinator import AirCloudHomeDataUpdateCoordinator
@@ -19,8 +22,10 @@ from custom_components.aircloudhome.entity_utils.climate_mappings import (
 from homeassistant.components.climate import ClimateEntity
 from homeassistant.components.climate.const import PRESET_NONE, ClimateEntityFeature, HVACMode
 from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
+from homeassistant.core import callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import EntityDescription
+from homeassistant.helpers.event import async_call_later
 
 # Climate entity description for AC units
 CLIMATE_ENTITY_DESCRIPTION = EntityDescription(
@@ -28,6 +33,9 @@ CLIMATE_ENTITY_DESCRIPTION = EntityDescription(
     name="Room Air Conditioner",
     translation_key="room_air_conditioner",
 )
+
+_OPTIMISTIC_OVERRIDE_TTL_SECONDS = 15.0
+_REFRESH_DELAY_SECONDS = 5.0
 
 
 class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
@@ -67,9 +75,72 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
         """Initialize the climate entity."""
         self._device_id = str(device["id"])
         self._last_known_device = dict(device)
+        self._optimistic_overrides: dict[str, tuple[Any, float]] = {}
+        self._cancel_pending_refresh: Callable[[], None] | None = None
         super().__init__(coordinator, entity_description, device_id=self._device_id)
         self._supports_humidity = False
         self._update_capabilities(self._last_known_device)
+
+    def _clear_expired_overrides(self) -> None:
+        """Drop optimistic overrides once the API has had enough time to catch up."""
+        now = monotonic()
+        expired_keys = [
+            key for key, (_, expires_at) in self._optimistic_overrides.items() if expires_at <= now
+        ]
+        for key in expired_keys:
+            self._optimistic_overrides.pop(key, None)
+
+    def _merge_device_with_overrides(self, device: dict[str, Any]) -> dict[str, Any]:
+        """Return the device payload with any active optimistic updates applied."""
+        self._clear_expired_overrides()
+
+        resolved_keys = [
+            key for key, (value, _) in self._optimistic_overrides.items() if device.get(key) == value
+        ]
+        for key in resolved_keys:
+            self._optimistic_overrides.pop(key, None)
+
+        merged_device = dict(device)
+        for key, (value, _) in self._optimistic_overrides.items():
+            merged_device[key] = value
+        return merged_device
+
+    def _apply_optimistic_updates(self, **updates: Any) -> None:
+        """Keep recently applied device values until the coordinator reflects them."""
+        expires_at = monotonic() + _OPTIMISTIC_OVERRIDE_TTL_SECONDS
+        for key, value in updates.items():
+            if value is None:
+                continue
+            self._optimistic_overrides[key] = (value, expires_at)
+            self._last_known_device[key] = value
+
+    def _schedule_delayed_refresh(self) -> None:
+        """Refresh after a short delay so eventual-consistency lag does not revert state."""
+        if self.hass is None:
+            return
+
+        if self._cancel_pending_refresh is not None:
+            self._cancel_pending_refresh()
+
+        @callback
+        def _async_handle_refresh(_: datetime) -> None:
+            """Trigger a background refresh after the delay expires."""
+            self._cancel_pending_refresh = None
+            self.hass.async_create_task(self._async_refresh_after_command())
+
+        self._cancel_pending_refresh = async_call_later(
+            self.hass,
+            _REFRESH_DELAY_SECONDS,
+            _async_handle_refresh,
+        )
+
+    async def _async_refresh_after_command(self) -> None:
+        """Retry refreshes while optimistic overrides are still waiting on coordinator data."""
+        await self.coordinator.async_request_refresh()
+        self._find_device()
+        self._clear_expired_overrides()
+        if self._optimistic_overrides:
+            self._schedule_delayed_refresh()
 
     def _update_capabilities(self, device: dict[str, Any]) -> None:
         """Update optional features based on the current device payload."""
@@ -86,15 +157,16 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
         for device in devices:
             if str(device.get("id")) != self._device_id:
                 continue
-            self._last_known_device = device
-            self._update_capabilities(device)
-            return device
+            resolved_device = self._merge_device_with_overrides(device)
+            self._last_known_device = resolved_device
+            self._update_capabilities(resolved_device)
+            return resolved_device
         return None
 
     @property
     def _device(self) -> dict[str, Any]:
         """Return the current device data, falling back to the last known payload."""
-        return self._find_device() or self._last_known_device
+        return self._find_device() or self._merge_device_with_overrides(self._last_known_device)
 
     def _get_device_info(self) -> DeviceInfo:
         """Get device information for this AC unit."""
@@ -221,6 +293,13 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
         """Turn off the AC."""
         await self._async_update_device(power="OFF")
 
+    async def async_will_remove_from_hass(self) -> None:
+        """Cancel any scheduled refresh callbacks when the entity is removed."""
+        if self._cancel_pending_refresh is not None:
+            self._cancel_pending_refresh()
+            self._cancel_pending_refresh = None
+        await super().async_will_remove_from_hass()
+
     async def _async_update_device(
         self,
         power: str | None = None,
@@ -265,21 +344,17 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
             humidity=resolved_humidity,
         )
 
-        # Update local state immediately for responsiveness.
-        if power is not None:
-            device["power"] = power
-        if mode is not None:
-            device["mode"] = mode
-        if fan_speed is not None:
-            device["fanSpeed"] = fan_speed
-        if fan_swing is not None:
-            device["fanSwing"] = fan_swing
-        if idu_temperature is not None:
-            device["iduTemperature"] = idu_temperature
-        if humidity is not None:
-            device["humidity"] = humidity
+        # Keep command results visible until the API reports them back.
+        self._apply_optimistic_updates(
+            power=power,
+            mode=mode,
+            fanSpeed=fan_speed,
+            fanSwing=fan_swing,
+            iduTemperature=idu_temperature,
+            humidity=humidity,
+        )
 
         self.async_write_ha_state()
 
-        # Refresh data from coordinator.
-        await self.coordinator.async_request_refresh()
+        # Delay refreshes slightly to avoid stale API payloads reverting the UI.
+        self._schedule_delayed_refresh()
