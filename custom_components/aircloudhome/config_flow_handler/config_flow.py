@@ -233,7 +233,12 @@ class AirCloudHomeConfigFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             The error key for display in the config flow form.
 
         """
-        LOGGER.warning("Error in config flow: %s", exception)
+        LOGGER.warning(
+            "Error in config flow (%s): %r",
+            type(exception).__name__,
+            exception,
+            exc_info=True,
+        )
         exception_name = type(exception).__name__
         return ERROR_MAP.get(exception_name, "unknown")
 

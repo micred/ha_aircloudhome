@@ -86,7 +86,7 @@ class AirCloudHomeApiClient:
 
     """
 
-    _BASE_URL = "https://api-kuma.aircloudhome.com"
+    _BASE_URL = "https://api-global-prod.aircloudhome.com"
 
     def __init__(
         self,

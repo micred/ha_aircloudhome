@@ -2,7 +2,7 @@
 
 This document describes the AirCloud Home cloud API endpoints used by this integration.
 
-**Base URL:** `https://api-kuma.aircloudhome.com`
+**Base URL:** `https://api-global-prod.aircloudhome.com`
 
 > **Tested hardware:** API behaviour documented here was verified against a **Hitachi RAS-X40L2**. Other **room air conditioners (RAC)** connected via AirCloud Home should be compatible. Packaged air conditioners (PAC) use a separate API and are out of scope for this integration.
 
