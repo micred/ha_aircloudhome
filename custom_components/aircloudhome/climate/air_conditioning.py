@@ -35,7 +35,7 @@ CLIMATE_ENTITY_DESCRIPTION = EntityDescription(
 )
 
 _OPTIMISTIC_OVERRIDE_TTL_SECONDS = 15.0
-_REFRESH_DELAY_SECONDS = 5.0
+_REFRESH_DELAY_SECONDS = 10.0
 
 
 class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
@@ -135,12 +135,10 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
         )
 
     async def _async_refresh_after_command(self) -> None:
-        """Retry refreshes while optimistic overrides are still waiting on coordinator data."""
+        """Run one delayed refresh after a command."""
         await self.coordinator.async_request_refresh()
         self._find_device()
         self._clear_expired_overrides()
-        if self._optimistic_overrides:
-            self._schedule_delayed_refresh()
 
     def _update_capabilities(self, device: dict[str, Any]) -> None:
         """Update optional features based on the current device payload."""
