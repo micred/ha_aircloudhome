@@ -85,9 +85,7 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
     def _clear_expired_overrides(self) -> None:
         """Drop optimistic overrides once the API has had enough time to catch up."""
         now = monotonic()
-        expired_keys = [
-            key for key, (_, expires_at) in self._optimistic_overrides.items() if expires_at <= now
-        ]
+        expired_keys = [key for key, (_, expires_at) in self._optimistic_overrides.items() if expires_at <= now]
         for key in expired_keys:
             self._optimistic_overrides.pop(key, None)
 
@@ -95,9 +93,7 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
         """Return the device payload with any active optimistic updates applied."""
         self._clear_expired_overrides()
 
-        resolved_keys = [
-            key for key, (value, _) in self._optimistic_overrides.items() if device.get(key) == value
-        ]
+        resolved_keys = [key for key, (value, _) in self._optimistic_overrides.items() if device.get(key) == value]
         for key in resolved_keys:
             self._optimistic_overrides.pop(key, None)
 
@@ -190,8 +186,7 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
             return bool(online)
 
         return any(
-            key in device
-            for key in ("power", "mode", "roomTemperature", "iduTemperature", "fanSpeed", "fanSwing")
+            key in device for key in ("power", "mode", "roomTemperature", "iduTemperature", "fanSpeed", "fanSwing")
         )
 
     @property
