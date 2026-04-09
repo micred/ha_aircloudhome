@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 import logging
 import socket
 from typing import Any
+from urllib.parse import urlsplit
 
 import aiohttp
 
@@ -23,6 +24,11 @@ _LOGGER = logging.getLogger(__name__)
 # Refresh tokens this many seconds before their stated expiry to account for
 # clock skew and network latency.
 _EXPIRY_BUFFER = timedelta(seconds=60)
+_DEFAULT_HEADERS = {
+    "Accept": "application/json",
+    "Content-Type": "application/json; charset=UTF-8",
+    "User-Agent": "okhttp/4.2.2",
+}
 
 
 class AirCloudHomeApiClientError(Exception):
@@ -365,10 +371,15 @@ class AirCloudHomeApiClient:
         try:
             async with asyncio.timeout(10):
                 _LOGGER.debug("API %s %s body=%s", method.upper(), url, data)
+                request_headers = {
+                    **_DEFAULT_HEADERS,
+                    **(headers or {}),
+                }
+                request_headers.setdefault("Host", urlsplit(url).netloc)
                 response = await self._session.request(
                     method=method,
                     url=url,
-                    headers=headers,
+                    headers=request_headers,
                     json=data,
                 )
                 needs_refresh = response.status == 401 and not _is_retry
