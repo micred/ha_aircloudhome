@@ -88,6 +88,7 @@ class AirCloudHomeConfigFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
 
         """
         errors: dict[str, str] = {}
+        LOGGER.warning("Config flow user step entered")
 
         if user_input is not None:
             try:
@@ -97,6 +98,7 @@ class AirCloudHomeConfigFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                     password=user_input[CONF_PASSWORD],
                 )
             except Exception as exception:  # noqa: BLE001
+                LOGGER.exception("Error in config flow while validating user credentials")
                 errors["base"] = self._map_exception_to_error(exception)
             else:
                 # Set unique ID based on email
@@ -147,6 +149,7 @@ class AirCloudHomeConfigFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                     password=user_input[CONF_PASSWORD],
                 )
             except Exception as exception:  # noqa: BLE001
+                LOGGER.exception("Error in config flow while validating reconfigure credentials")
                 errors["base"] = self._map_exception_to_error(exception)
             else:
                 return self.async_update_reload_and_abort(
@@ -206,6 +209,7 @@ class AirCloudHomeConfigFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                     password=user_input[CONF_PASSWORD],
                 )
             except Exception as exception:  # noqa: BLE001
+                LOGGER.exception("Error in config flow while validating reauth credentials")
                 errors["base"] = self._map_exception_to_error(exception)
             else:
                 return self.async_update_reload_and_abort(
@@ -233,12 +237,6 @@ class AirCloudHomeConfigFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             The error key for display in the config flow form.
 
         """
-        LOGGER.warning(
-            "Error in config flow (%s): %r",
-            type(exception).__name__,
-            exception,
-            exc_info=True,
-        )
         exception_name = type(exception).__name__
         return ERROR_MAP.get(exception_name, "unknown")
 
