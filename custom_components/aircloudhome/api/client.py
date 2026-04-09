@@ -95,7 +95,7 @@ class AirCloudHomeApiClient:
     _BASE_URL = "https://api-global-prod.aircloudhome.com"
     _WHO_AM_I_URL = f"{_BASE_URL}/iam/user/v2/who-am-i"
     _FAMILY_GROUPS_URL = f"{_BASE_URL}/iam/family-account/v2/groups"
-    _CLOUD_IDS_URL = f"{_BASE_URL}/rac/ownership/groups/cloudIds/{{family_id}}"
+    _IDU_LIST_URL = f"{_BASE_URL}/rac/ownership/groups/{{family_id}}/idu-list"
 
     def __init__(
         self,
@@ -240,12 +240,12 @@ class AirCloudHomeApiClient:
 
         response = await self._api_wrapper(
             method="get",
-            url=self._CLOUD_IDS_URL.format(family_id=family_id),
+            url=self._IDU_LIST_URL.format(family_id=family_id),
             headers={"Authorization": f"Bearer {self._access_token}"},
         )
         devices = self._normalize_device_list(response, family_id)
         if not devices:
-            LOGGER.warning("Cloud ID response for family %s did not contain device data", family_id)
+            _LOGGER.warning("IDU list response for family %s did not contain device data", family_id)
         return devices
 
     async def async_control_device(
@@ -308,10 +308,10 @@ class AirCloudHomeApiClient:
         """
         Normalize API responses into a list of device dictionaries.
 
-        The Europe API has been observed to return either a list of device
+        The API has been observed to return either a list of device
         dictionaries or a wrapped object with the list nested in ``result`` or
-        ``data``. If only scalar cloud IDs are returned, keep a minimal
-        dictionary so the caller can at least retain the IDs.
+        ``data``. Ignore scalar identifiers because they do not contain enough
+        state to build a working climate entity.
         """
         candidate: Any = response
         if isinstance(response, dict):
@@ -328,9 +328,12 @@ class AirCloudHomeApiClient:
             if isinstance(item, dict):
                 device = dict(item)
                 device.setdefault("familyId", family_id)
+                humidity = device.get("humidity")
+                if not isinstance(humidity, (int, float)) or not 40 <= int(humidity) <= 60:
+                    device.pop("humidity", None)
+                else:
+                    device["humidity"] = int(humidity)
                 devices.append(device)
-            elif isinstance(item, (int, str)):
-                devices.append({"id": item, "familyId": family_id})
 
         return devices
 
