@@ -19,6 +19,7 @@ from custom_components.aircloudhome.entity_utils.climate_mappings import (
     HVAC_MODE_TO_API_MODE,
     PRESET_DRY_COOL,
 )
+from custom_components.aircloudhome.entity_utils.device_info import normalize_serial_number
 from homeassistant.components.climate import ClimateEntity
 from homeassistant.components.climate.const import PRESET_NONE, ClimateEntityFeature, HVACMode
 from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
@@ -172,7 +173,7 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
             identifiers={("aircloudhome", f"{self.coordinator.config_entry.entry_id}_{self._device['id']}")},
             name=self._device.get("name", f"AC Unit {self._device['id']}"),
             manufacturer=self._device.get("model"),
-            serial_number=self._device.get("serialNumber"),
+            serial_number=normalize_serial_number(self._device.get("serialNumber")),
             hw_version=self._device.get("vendorThingId"),
         )
 
