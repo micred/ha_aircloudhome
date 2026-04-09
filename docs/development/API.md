@@ -2,9 +2,73 @@
 
 This document describes the AirCloud Home cloud API endpoints used by this integration.
 
-**Base URL:** `https://api-global-prod.aircloudhome.com`
+**Base URLs:**
+
+- Japan / legacy: `https://api-kuma.aircloudhome.com`
+- Europe / global: `https://api-global-prod.aircloudhome.com`
 
 > **Tested hardware:** API behaviour documented here was verified against a **Hitachi RAS-X40L2**. Other **room air conditioners (RAC)** connected via AirCloud Home should be compatible. Packaged air conditioners (PAC) use a separate API and are out of scope for this integration.
+
+## API Migration Status
+
+The integration was originally built around the Japan / legacy API shape and is being migrated to the Europe / global API.
+
+### What is confirmed
+
+- `POST /iam/auth/sign-in` works against the global base URL and returns access and refresh tokens.
+- `GET /iam/family-account/v2/groups` appears to remain part of the account model.
+- `GET /iam/user/v2/who-am-i` appears to expose account metadata such as `familyId`.
+- The Home Assistant integration now sends mobile-app style headers (`Accept`, `Content-Type`, `User-Agent: okhttp/4.2.2`) while calling the global API.
+
+### Current blocker
+
+The old Japan flow assumed this sequence:
+
+1. Sign in
+2. Fetch family groups
+3. Fetch devices with `GET /rac/ownership/groups/{familyId}/idu-list`
+4. Poll device state from that REST response
+
+That flow does not translate directly to the Europe / global API.
+
+For a tested Europe account, the following call returned `403 FORBIDDEN`:
+
+```text
+GET https://api-global-prod.aircloudhome.com/rac/ownership/groups/cloudIds/{familyId}
+```
+
+Response body:
+
+```json
+{
+  "error": "FORBIDDEN",
+  "message": "Access Denied"
+}
+```
+
+### Practical consequence
+
+This is not just a hostname migration. Authentication works, but device discovery and state retrieval are not yet confirmed to be REST-compatible with the older Japan integration.
+
+The strongest current inference is that the Europe / global app uses a different ownership or notification flow, likely involving websocket-based state updates rather than the old REST `idu-list` polling model.
+
+Treat the REST device-list endpoints below as:
+
+- confirmed for the Japan / legacy API
+- unconfirmed or incompatible for the Europe / global API unless otherwise stated
+
+### Current integration behavior
+
+The code currently:
+
+- uses the global base URL in [`custom_components/aircloudhome/api/client.py`](../../custom_components/aircloudhome/api/client.py)
+- attempts `who-am-i` as a fallback source for `familyId`
+- attempts `GET /rac/ownership/groups/cloudIds/{familyId}` for global discovery
+- logs config-flow exceptions explicitly so migration failures are visible in Home Assistant logs
+
+### Next migration work
+
+The remaining migration challenge is to discover and implement the Europe / global device discovery and state channel, not merely rename REST endpoints.
 
 ## Authentication
 
