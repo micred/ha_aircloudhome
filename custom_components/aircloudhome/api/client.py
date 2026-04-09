@@ -96,6 +96,7 @@ class AirCloudHomeApiClient:
     _WHO_AM_I_URL = f"{_BASE_URL}/iam/user/v2/who-am-i"
     _FAMILY_GROUPS_URL = f"{_BASE_URL}/iam/family-account/v2/groups"
     _IDU_LIST_URL = f"{_BASE_URL}/rac/ownership/groups/{{family_id}}/idu-list"
+    _ENERGY_SUMMARY_URL = f"{_BASE_URL}/rac/energy-consumptions/summary/v3?familyId={{family_id}}"
 
     def __init__(
         self,
@@ -248,6 +249,43 @@ class AirCloudHomeApiClient:
             _LOGGER.warning("IDU list response for family %s did not contain device data", family_id)
         return devices
 
+    async def async_get_energy_consumption_summary(
+        self,
+        family_id: int,
+        from_date: str,
+        to_date: str,
+    ) -> dict[str, Any]:
+        """
+        Get cumulative RAC energy consumption summary for a family group.
+
+        Args:
+            family_id: The family group ID.
+            from_date: Inclusive start date in ``YYYY-MM-DD`` format.
+            to_date: Inclusive end date in ``YYYY-MM-DD`` format.
+
+        Returns:
+            A normalized summary containing ``allRacsData`` and
+            ``individualRacsData``.
+
+        Raises:
+            AirCloudHomeApiClientAuthenticationError: If authentication fails.
+            AirCloudHomeApiClientCommunicationError: If communication fails.
+            AirCloudHomeApiClientError: For other API errors.
+
+        """
+        await self._async_ensure_valid_token()
+
+        response = await self._api_wrapper(
+            method="post",
+            url=self._ENERGY_SUMMARY_URL.format(family_id=family_id),
+            data={
+                "from": from_date,
+                "to": to_date,
+            },
+            headers={"Authorization": f"Bearer {self._access_token}"},
+        )
+        return self._normalize_energy_summary(response)
+
     async def async_control_device(
         self,
         rac_id: int,
@@ -336,6 +374,76 @@ class AirCloudHomeApiClient:
                 devices.append(device)
 
         return devices
+
+    def _normalize_energy_summary(self, response: Any) -> dict[str, Any]:
+        """Normalize energy summary responses into a predictable dictionary."""
+        if not isinstance(response, dict):
+            return {
+                "allRacsData": None,
+                "individualRacsData": [],
+            }
+
+        all_racs_data = self._normalize_energy_summary_item(
+            response.get("allRacsData"),
+            require_rac_id=False,
+        )
+        individual_racs_data = []
+        for item in response.get("individualRacsData", []):
+            normalized_item = self._normalize_energy_summary_item(item)
+            if normalized_item is not None:
+                individual_racs_data.append(normalized_item)
+
+        return {
+            "allRacsData": all_racs_data,
+            "individualRacsData": individual_racs_data,
+        }
+
+    def _normalize_energy_summary_item(
+        self,
+        item: Any,
+        *,
+        require_rac_id: bool = True,
+    ) -> dict[str, Any] | None:
+        """Normalize a single energy summary record."""
+        if not isinstance(item, dict):
+            return None
+
+        normalized: dict[str, Any] = {}
+
+        rac_id = item.get("racId")
+        if rac_id is not None:
+            try:
+                normalized["racId"] = int(rac_id)
+            except (TypeError, ValueError):
+                if require_rac_id:
+                    return None
+        elif require_rac_id:
+            return None
+
+        if vendor_thing_id := item.get("vendorThingId"):
+            normalized["vendorThingId"] = vendor_thing_id
+        if rac_name := item.get("racName"):
+            normalized["racName"] = rac_name
+        if (energy_consumed := self._coerce_float(item.get("energyConsumed"))) is not None:
+            normalized["energyConsumed"] = energy_consumed
+        if (cost := self._coerce_float(item.get("cost"))) is not None:
+            normalized["cost"] = cost
+        if (budget := self._coerce_float(item.get("budget"))) is not None:
+            normalized["budget"] = budget
+        if currency := item.get("currency"):
+            normalized["currency"] = currency
+
+        return normalized
+
+    def _coerce_float(self, value: Any) -> float | None:
+        """Return ``value`` as ``float`` when possible."""
+        if value is None:
+            return None
+
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
     async def _api_wrapper(
         self,

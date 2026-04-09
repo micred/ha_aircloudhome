@@ -14,9 +14,15 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from custom_components.aircloudhome.api import AirCloudHomeApiClientAuthenticationError, AirCloudHomeApiClientError
-from custom_components.aircloudhome.const import LOGGER
+from custom_components.aircloudhome.const import (
+    CONF_ENABLE_ENERGY_MONITORING,
+    DEFAULT_ENABLE_ENERGY_MONITORING,
+    ENERGY_MONITORING_START_DATE,
+    LOGGER,
+)
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 if TYPE_CHECKING:
     from custom_components.aircloudhome.data import AirCloudHomeConfigEntry
@@ -84,7 +90,18 @@ class AirCloudHomeDataUpdateCoordinator(DataUpdateCoordinator):
                         "online": bool,
                         "familyId": int,
                     }
-                ]
+                ],
+                "energy_by_rac_id": {
+                    10001: {
+                        "racId": 10001,
+                        "energyConsumed": 123.45,
+                        "cost": 12.34,
+                    }
+                },
+                "energy_period": {
+                    "from": "2000-01-01",
+                    "to": "2026-04-09",
+                },
             }
 
         Raises:
@@ -103,7 +120,11 @@ class AirCloudHomeDataUpdateCoordinator(DataUpdateCoordinator):
                     family_groups = [{"familyId": family_id}]
                 else:
                     LOGGER.warning("No family groups found for user")
-                    return {"devices": []}
+                    return {
+                        "devices": [],
+                        "energy_by_rac_id": {},
+                        "energy_period": None,
+                    }
 
             # Fetch devices from all family groups
             devices = []
@@ -118,6 +139,25 @@ class AirCloudHomeDataUpdateCoordinator(DataUpdateCoordinator):
                 for device in idu_list:
                     device["familyId"] = family_id
                     devices.append(device)
+
+            energy_by_rac_id: dict[int, dict[str, Any]] = {}
+            energy_period: dict[str, str] | None = None
+            if self.config_entry.options.get(
+                CONF_ENABLE_ENERGY_MONITORING,
+                DEFAULT_ENABLE_ENERGY_MONITORING,
+            ):
+                energy_period = self._get_energy_summary_period()
+                family_ids = {int(device["familyId"]) for device in devices if device.get("familyId") is not None}
+                for family_id in family_ids:
+                    summary = await client.async_get_energy_consumption_summary(
+                        family_id=family_id,
+                        from_date=energy_period["from"],
+                        to_date=energy_period["to"],
+                    )
+                    for item in summary.get("individualRacsData", []):
+                        if (rac_id := item.get("racId")) is None:
+                            continue
+                        energy_by_rac_id[int(rac_id)] = item
         except AirCloudHomeApiClientAuthenticationError as exception:
             LOGGER.warning("Authentication error - %s", exception)
             raise ConfigEntryAuthFailed(
@@ -131,4 +171,15 @@ class AirCloudHomeDataUpdateCoordinator(DataUpdateCoordinator):
                 translation_key="update_failed",
             ) from exception
         else:
-            return {"devices": devices}
+            return {
+                "devices": devices,
+                "energy_by_rac_id": energy_by_rac_id,
+                "energy_period": energy_period,
+            }
+
+    def _get_energy_summary_period(self) -> dict[str, str]:
+        """Return the date range used for cumulative energy monitoring."""
+        return {
+            "from": ENERGY_MONITORING_START_DATE,
+            "to": dt_util.now().date().isoformat(),
+        }

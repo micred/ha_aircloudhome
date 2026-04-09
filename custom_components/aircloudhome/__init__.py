@@ -22,7 +22,14 @@ import homeassistant.helpers.config_validation as cv
 from homeassistant.loader import async_get_loaded_integration
 
 from .api import AirCloudHomeApiClient
-from .const import CONF_UPDATE_INTERVAL_MINUTES, DEFAULT_UPDATE_INTERVAL_MINUTES, DOMAIN, LOGGER
+from .const import (
+    CONF_ENABLE_ENERGY_MONITORING,
+    CONF_UPDATE_INTERVAL_MINUTES,
+    DEFAULT_ENABLE_ENERGY_MONITORING,
+    DEFAULT_UPDATE_INTERVAL_MINUTES,
+    DOMAIN,
+    LOGGER,
+)
 from .coordinator import AirCloudHomeDataUpdateCoordinator
 from .data import AirCloudHomeData
 
@@ -31,9 +38,7 @@ if TYPE_CHECKING:
 
     from .data import AirCloudHomeConfigEntry
 
-PLATFORMS: list[Platform] = [
-    Platform.CLIMATE,
-]
+BASE_PLATFORMS: tuple[Platform, ...] = (Platform.CLIMATE,)
 
 # This integration is configured via config entries only
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -107,17 +112,20 @@ async def async_setup_entry(
         always_update=False,  # Only update entities when data actually changes
     )
 
+    platforms = _get_entry_platforms(entry)
+
     # Store runtime data
     entry.runtime_data = AirCloudHomeData(
         client=client,
         integration=async_get_loaded_integration(hass, entry.domain),
         coordinator=coordinator,
+        platforms=platforms,
     )
 
     # https://developers.home-assistant.io/docs/integration_fetching_data#coordinated-single-api-poll-for-data-for-all-entities
     await coordinator.async_config_entry_first_refresh()
 
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    await hass.config_entries.async_forward_entry_setups(entry, platforms)
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
 
     return True
@@ -145,7 +153,7 @@ async def async_unload_entry(
     For more information:
     https://developers.home-assistant.io/docs/config_entries_index/#unloading-entries
     """
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    return await hass.config_entries.async_unload_platforms(entry, entry.runtime_data.platforms)
 
 
 async def async_reload_entry(
@@ -166,3 +174,15 @@ async def async_reload_entry(
     https://developers.home-assistant.io/docs/config_entries_index/#reloading-entries
     """
     await hass.config_entries.async_reload(entry.entry_id)
+
+
+def _get_entry_platforms(entry: AirCloudHomeConfigEntry) -> tuple[Platform, ...]:
+    """Return the platforms that should be loaded for this entry."""
+    platforms = list(BASE_PLATFORMS)
+    if entry.options.get(
+        CONF_ENABLE_ENERGY_MONITORING,
+        DEFAULT_ENABLE_ENERGY_MONITORING,
+    ):
+        platforms.append(Platform.SENSOR)
+
+    return tuple(platforms)
