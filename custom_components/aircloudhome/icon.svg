@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#bf002d"/>
+      <stop offset="100%" style="stop-color:#bf002d"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" fill="url(#bg)" rx="52"/>
+
+  <!-- White cloud -->
+  <ellipse cx="128" cy="168" rx="88" ry="36" fill="white"/>
+  <ellipse cx="96"  cy="145" rx="52" ry="52" fill="white"/>
+  <ellipse cx="140" cy="128" rx="60" ry="58" fill="white"/>
+  <ellipse cx="180" cy="150" rx="44" ry="36" fill="white"/>
+
+  <!--
+    Snowflake centered at (138, 148).
+    6 arms of length 26 at 90°,30°,-30°,-90°,-150°,150° (SVG: 270°,330°,30°,90°,150°,210°).
+    Branches at 2/3 of arm (≈17) and arm tip (26), each at ±45° from arm direction, length 8.
+    Using explicit coords to avoid the hex-ring issue from ±60° branches.
+
+    cos/sin reference (SVG coords, y-down):
+      arm up    (270°): dx=0,  dy=-1
+      arm ur    (330°): dx=0.866, dy=-0.5
+      arm lr    ( 30°): dx=0.866, dy=0.5
+      arm down  ( 90°): dx=0,  dy=1
+      arm ll    (150°): dx=-0.866, dy=0.5
+      arm ul    (210°): dx=-0.866, dy=-0.5
+
+    Branch at angle (arm_angle ± 45°), length 8:
+      bx = base_x + 8*cos(arm_angle ± 45°)
+      by = base_y + 8*sin(arm_angle ± 45°)
+  -->
+  <g transform="translate(138,148)" stroke="#bf002d" stroke-linecap="round" fill="none">
+    <!-- ARM UP (270°): tip (0,-26) -->
+    <line x1="0" y1="0"   x2="0"   y2="-26" stroke-width="5.5"/>
+    <!-- branch at d=17: base (0,-17), dirs 225° and 315° -->
+    <!-- 225°: cos=-0.707,sin=-0.707 → (-5.66,-5.66) -->
+    <!-- 315°: cos=0.707,sin=-0.707  → (5.66,-5.66) -->
+    <line x1="0" y1="-17" x2="-5.66" y2="-22.66" stroke-width="3.5"/>
+    <line x1="0" y1="-17" x2="5.66"  y2="-22.66" stroke-width="3.5"/>
+    <!-- branch at d=26 tip (0,-26), dirs 225° and 315° -->
+    <line x1="0" y1="-26" x2="-5.66" y2="-31.66" stroke-width="3.5"/>
+    <line x1="0" y1="-26" x2="5.66"  y2="-31.66" stroke-width="3.5"/>
+
+    <!-- ARM DOWN (90°): tip (0,26) -->
+    <line x1="0" y1="0"  x2="0"   y2="26"  stroke-width="5.5"/>
+    <!-- branch at d=17: base (0,17), dirs 45° and 135° -->
+    <!-- 45°:  cos=0.707,sin=0.707   → (5.66,5.66) -->
+    <!-- 135°: cos=-0.707,sin=0.707  → (-5.66,5.66) -->
+    <line x1="0" y1="17" x2="5.66"  y2="22.66" stroke-width="3.5"/>
+    <line x1="0" y1="17" x2="-5.66" y2="22.66" stroke-width="3.5"/>
+    <line x1="0" y1="26" x2="5.66"  y2="31.66" stroke-width="3.5"/>
+    <line x1="0" y1="26" x2="-5.66" y2="31.66" stroke-width="3.5"/>
+
+    <!-- ARM UR (330°): tip (22.52,-13) -->
+    <line x1="0" y1="0"  x2="22.52" y2="-13"  stroke-width="5.5"/>
+    <!-- base at d=17: (14.72,-8.5), dirs 285° and 15° -->
+    <!-- 285°: cos=0.259,sin=-0.966 → (2.07,-7.73) -->
+    <!-- 15°:  cos=0.966,sin=0.259  → (7.73,2.07) -->
+    <line x1="14.72" y1="-8.5"  x2="16.79" y2="-16.23" stroke-width="3.5"/>
+    <line x1="14.72" y1="-8.5"  x2="22.45" y2="-6.43"  stroke-width="3.5"/>
+    <line x1="22.52" y1="-13"   x2="24.59" y2="-20.73" stroke-width="3.5"/>
+    <line x1="22.52" y1="-13"   x2="30.25" y2="-10.93" stroke-width="3.5"/>
+
+    <!-- ARM LL (150°): tip (-22.52,13) -->
+    <line x1="0" y1="0"  x2="-22.52" y2="13"   stroke-width="5.5"/>
+    <!-- base at d=17: (-14.72,8.5), dirs 105° and 195° -->
+    <!-- 105°: cos=-0.259,sin=0.966 → (-2.07,7.73) -->
+    <!-- 195°: cos=-0.966,sin=-0.259 → (-7.73,-2.07) -->
+    <line x1="-14.72" y1="8.5"  x2="-16.79" y2="16.23"  stroke-width="3.5"/>
+    <line x1="-14.72" y1="8.5"  x2="-22.45" y2="6.43"   stroke-width="3.5"/>
+    <line x1="-22.52" y1="13"   x2="-24.59" y2="20.73"  stroke-width="3.5"/>
+    <line x1="-22.52" y1="13"   x2="-30.25" y2="10.93"  stroke-width="3.5"/>
+
+    <!-- ARM LR (30°): tip (22.52,13) -->
+    <line x1="0" y1="0"  x2="22.52" y2="13"   stroke-width="5.5"/>
+    <!-- base at d=17: (14.72,8.5), dirs 75° and -15° (345°) -->
+    <!-- 75°:  cos=0.259,sin=0.966  → (2.07,7.73) -->
+    <!-- 345°: cos=0.966,sin=-0.259 → (7.73,-2.07) -->
+    <line x1="14.72" y1="8.5"  x2="16.79" y2="16.23" stroke-width="3.5"/>
+    <line x1="14.72" y1="8.5"  x2="22.45" y2="6.43"  stroke-width="3.5"/>
+    <line x1="22.52" y1="13"   x2="24.59" y2="20.73" stroke-width="3.5"/>
+    <line x1="22.52" y1="13"   x2="30.25" y2="10.93" stroke-width="3.5"/>
+
+    <!-- ARM UL (210°): tip (-22.52,-13) -->
+    <line x1="0" y1="0"  x2="-22.52" y2="-13"  stroke-width="5.5"/>
+    <!-- base at d=17: (-14.72,-8.5), dirs 255° and 165° -->
+    <!-- 255°: cos=-0.259,sin=-0.966 → (-2.07,-7.73) -->
+    <!-- 165°: cos=-0.966,sin=0.259  → (-7.73,2.07) -->
+    <line x1="-14.72" y1="-8.5"  x2="-16.79" y2="-16.23" stroke-width="3.5"/>
+    <line x1="-14.72" y1="-8.5"  x2="-22.45" y2="-6.43"  stroke-width="3.5"/>
+    <line x1="-22.52" y1="-13"   x2="-24.59" y2="-20.73" stroke-width="3.5"/>
+    <line x1="-22.52" y1="-13"   x2="-30.25" y2="-10.93" stroke-width="3.5"/>
+
+    <!-- Center -->
+    <circle cx="0" cy="0" r="5" fill="#bf002d" stroke="none"/>
+  </g>
+</svg>
