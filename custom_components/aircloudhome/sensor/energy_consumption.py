@@ -8,12 +8,7 @@ from custom_components.aircloudhome.const import DOMAIN
 from custom_components.aircloudhome.coordinator import AirCloudHomeDataUpdateCoordinator
 from custom_components.aircloudhome.entity import AirCloudHomeEntity
 from custom_components.aircloudhome.entity_utils.device_info import build_rac_device_info
-from homeassistant.components.sensor import (
-    SensorDeviceClass,
-    SensorEntity,
-    SensorEntityDescription,
-    SensorStateClass,
-)
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorEntityDescription, SensorStateClass
 from homeassistant.const import UnitOfEnergy
 from homeassistant.helpers.device_registry import DeviceInfo
 

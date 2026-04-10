@@ -121,6 +121,7 @@ async def async_setup_entry(
         coordinator=coordinator,
         platforms=platforms,
     )
+    entry.async_on_unload(coordinator.async_cancel_scheduled_post_command_refresh)
 
     # https://developers.home-assistant.io/docs/integration_fetching_data#coordinated-single-api-poll-for-data-for-all-entities
     await coordinator.async_config_entry_first_refresh()

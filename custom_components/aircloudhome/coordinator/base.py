@@ -11,6 +11,8 @@ https://developers.home-assistant.io/docs/integration_fetching_data#coordinated-
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from custom_components.aircloudhome.api import AirCloudHomeApiClientAuthenticationError, AirCloudHomeApiClientError
@@ -20,12 +22,17 @@ from custom_components.aircloudhome.const import (
     ENERGY_MONITORING_START_DATE,
     LOGGER,
 )
+from homeassistant.core import callback
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
 if TYPE_CHECKING:
     from custom_components.aircloudhome.data import AirCloudHomeConfigEntry
+
+_ENERGY_SUMMARY_REFRESH_INTERVAL = timedelta(hours=1)
+_POST_COMMAND_REFRESH_DELAY_SECONDS = 10.0
 
 
 class AirCloudHomeDataUpdateCoordinator(DataUpdateCoordinator):
@@ -48,6 +55,44 @@ class AirCloudHomeDataUpdateCoordinator(DataUpdateCoordinator):
     """
 
     config_entry: AirCloudHomeConfigEntry
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Initialize coordinator caches and shared refresh scheduling."""
+        super().__init__(*args, **kwargs)
+        self._cached_family_ids: tuple[int, ...] | None = None
+        self._cached_energy_by_rac_id: dict[int, dict[str, Any]] = {}
+        self._cached_energy_family_ids: frozenset[int] = frozenset()
+        self._cached_energy_period: dict[str, str] | None = None
+        self._last_energy_refresh_at: datetime | None = None
+        self._cancel_pending_post_command_refresh: Callable[[], None] | None = None
+
+    @callback
+    def async_schedule_post_command_refresh(self) -> None:
+        """Collapse rapid device commands into one follow-up refresh."""
+        self.async_cancel_scheduled_post_command_refresh()
+
+        @callback
+        def _async_handle_refresh(_: datetime) -> None:
+            """Trigger a single delayed coordinator refresh."""
+            self._cancel_pending_post_command_refresh = None
+            self.hass.async_create_task(self._async_refresh_after_command())
+
+        self._cancel_pending_post_command_refresh = async_call_later(
+            self.hass,
+            _POST_COMMAND_REFRESH_DELAY_SECONDS,
+            _async_handle_refresh,
+        )
+
+    @callback
+    def async_cancel_scheduled_post_command_refresh(self) -> None:
+        """Cancel any pending delayed refresh scheduled after a device command."""
+        if self._cancel_pending_post_command_refresh is not None:
+            self._cancel_pending_post_command_refresh()
+            self._cancel_pending_post_command_refresh = None
+
+    async def _async_refresh_after_command(self) -> None:
+        """Refresh coordinator data after a debounced control command."""
+        await self.async_request_refresh()
 
     async def _async_setup(self) -> None:
         """
@@ -111,31 +156,19 @@ class AirCloudHomeDataUpdateCoordinator(DataUpdateCoordinator):
         try:
             client = self.config_entry.runtime_data.client
 
-            # Fetch family groups
-            family_groups = await client.async_get_family_groups()
-            if not family_groups:
-                who_am_i = await client.async_get_who_am_i()
-                family_id = who_am_i.get("familyId")
-                if family_id:
-                    family_groups = [{"familyId": family_id}]
-                else:
-                    LOGGER.warning("No family groups found for user")
-                    return {
-                        "devices": [],
-                        "energy_by_rac_id": {},
-                        "energy_period": None,
-                    }
+            family_ids = await self._async_resolve_family_ids()
+            if not family_ids:
+                LOGGER.warning("No family groups found for user")
+                return {
+                    "devices": [],
+                    "energy_by_rac_id": {},
+                    "energy_period": None,
+                }
 
             # Fetch devices from all family groups
             devices = []
-            for family_group in family_groups:
-                family_id = family_group.get("familyId")
-                if not family_id:
-                    LOGGER.warning("Family group missing familyId")
-                    continue
-
+            for family_id in family_ids:
                 idu_list = await client.async_get_idu_list(family_id)
-
                 for device in idu_list:
                     device["familyId"] = family_id
                     devices.append(device)
@@ -147,17 +180,7 @@ class AirCloudHomeDataUpdateCoordinator(DataUpdateCoordinator):
                 DEFAULT_ENABLE_ENERGY_MONITORING,
             ):
                 energy_period = self._get_energy_summary_period()
-                family_ids = {int(device["familyId"]) for device in devices if device.get("familyId") is not None}
-                for family_id in family_ids:
-                    summary = await client.async_get_energy_consumption_summary(
-                        family_id=family_id,
-                        from_date=energy_period["from"],
-                        to_date=energy_period["to"],
-                    )
-                    for item in summary.get("individualRacsData", []):
-                        if (rac_id := item.get("racId")) is None:
-                            continue
-                        energy_by_rac_id[int(rac_id)] = item
+                energy_by_rac_id = await self._async_get_energy_summary_data(devices, energy_period)
         except AirCloudHomeApiClientAuthenticationError as exception:
             LOGGER.warning("Authentication error - %s", exception)
             raise ConfigEntryAuthFailed(
@@ -183,3 +206,92 @@ class AirCloudHomeDataUpdateCoordinator(DataUpdateCoordinator):
             "from": ENERGY_MONITORING_START_DATE,
             "to": dt_util.now().date().isoformat(),
         }
+
+    async def _async_resolve_family_ids(self) -> tuple[int, ...]:
+        """Resolve and cache family IDs because account membership rarely changes."""
+        if self._cached_family_ids is not None:
+            return self._cached_family_ids
+
+        client = self.config_entry.runtime_data.client
+        family_ids: set[int] = set()
+
+        for family_group in await client.async_get_family_groups():
+            if (family_id := self._normalize_family_id(family_group.get("familyId"))) is not None:
+                family_ids.add(family_id)
+
+        if not family_ids:
+            who_am_i = await client.async_get_who_am_i()
+            if (family_id := self._normalize_family_id(who_am_i.get("familyId"))) is not None:
+                family_ids.add(family_id)
+
+        resolved_family_ids = tuple(sorted(family_ids))
+        if resolved_family_ids:
+            self._cached_family_ids = resolved_family_ids
+
+        return resolved_family_ids
+
+    async def _async_get_energy_summary_data(
+        self,
+        devices: list[dict[str, Any]],
+        energy_period: dict[str, str],
+    ) -> dict[int, dict[str, Any]]:
+        """Fetch energy summaries on a slower cadence than device state polling."""
+        family_ids = {
+            family_id
+            for device in devices
+            if (family_id := self._normalize_family_id(device.get("familyId"))) is not None
+        }
+
+        if not family_ids:
+            self._cached_energy_by_rac_id = {}
+            self._cached_energy_family_ids = frozenset()
+            self._cached_energy_period = dict(energy_period)
+            self._last_energy_refresh_at = datetime.now(UTC)
+            return {}
+
+        if not self._should_refresh_energy_summary(family_ids, energy_period):
+            return dict(self._cached_energy_by_rac_id)
+
+        client = self.config_entry.runtime_data.client
+        energy_by_rac_id: dict[int, dict[str, Any]] = {}
+        for family_id in family_ids:
+            summary = await client.async_get_energy_consumption_summary(
+                family_id=family_id,
+                from_date=energy_period["from"],
+                to_date=energy_period["to"],
+            )
+            for item in summary.get("individualRacsData", []):
+                if (rac_id := self._normalize_family_id(item.get("racId"))) is None:
+                    continue
+                energy_by_rac_id[rac_id] = item
+
+        self._cached_energy_by_rac_id = energy_by_rac_id
+        self._cached_energy_family_ids = frozenset(family_ids)
+        self._cached_energy_period = dict(energy_period)
+        self._last_energy_refresh_at = datetime.now(UTC)
+        return dict(self._cached_energy_by_rac_id)
+
+    def _should_refresh_energy_summary(
+        self,
+        family_ids: set[int],
+        energy_period: dict[str, str],
+    ) -> bool:
+        """Return whether the energy summary cache should be refreshed."""
+        if self._cached_energy_period != energy_period:
+            return True
+
+        if self._cached_energy_family_ids != frozenset(family_ids):
+            return True
+
+        if self._last_energy_refresh_at is None:
+            return True
+
+        return datetime.now(UTC) - self._last_energy_refresh_at >= _ENERGY_SUMMARY_REFRESH_INTERVAL
+
+    @staticmethod
+    def _normalize_family_id(value: Any) -> int | None:
+        """Convert numeric API identifiers into integers."""
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None

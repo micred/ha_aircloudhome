@@ -20,8 +20,8 @@ import voluptuous as vol
 from custom_components.aircloudhome.const import (
     CONF_ENABLE_ENERGY_MONITORING,
     CONF_UPDATE_INTERVAL_MINUTES,
-    DEFAULT_ENABLE_ENERGY_MONITORING,
     DEFAULT_ENABLE_DEBUGGING,
+    DEFAULT_ENABLE_ENERGY_MONITORING,
     DEFAULT_UPDATE_INTERVAL_MINUTES,
 )
 from homeassistant.helpers import selector

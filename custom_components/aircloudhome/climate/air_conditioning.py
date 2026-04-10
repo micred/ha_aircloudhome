@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from datetime import datetime
 from time import monotonic
 from typing import Any
 
-from custom_components.aircloudhome.coordinator import AirCloudHomeDataUpdateCoordinator
 from custom_components.aircloudhome.const import DOMAIN
+from custom_components.aircloudhome.coordinator import AirCloudHomeDataUpdateCoordinator
 from custom_components.aircloudhome.entity import AirCloudHomeEntity
 from custom_components.aircloudhome.entity_utils.climate_mappings import (
     API_FAN_SPEED_TO_HA,
@@ -24,10 +22,8 @@ from custom_components.aircloudhome.entity_utils.device_info import build_rac_de
 from homeassistant.components.climate import ClimateEntity
 from homeassistant.components.climate.const import PRESET_NONE, ClimateEntityFeature, HVACMode
 from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
-from homeassistant.core import callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import EntityDescription
-from homeassistant.helpers.event import async_call_later
 
 # Climate entity description for AC units
 CLIMATE_ENTITY_DESCRIPTION = EntityDescription(
@@ -37,7 +33,6 @@ CLIMATE_ENTITY_DESCRIPTION = EntityDescription(
 )
 
 _OPTIMISTIC_OVERRIDE_TTL_SECONDS = 15.0
-_REFRESH_DELAY_SECONDS = 10.0
 
 
 class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
@@ -78,7 +73,6 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
         self._device_id = str(device["id"])
         self._last_known_device = dict(device)
         self._optimistic_overrides: dict[str, tuple[Any, float]] = {}
-        self._cancel_pending_refresh: Callable[[], None] | None = None
         super().__init__(coordinator, entity_description, device_id=self._device_id)
         self._supports_humidity = False
         self._update_capabilities(self._last_known_device)
@@ -111,32 +105,6 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
                 continue
             self._optimistic_overrides[key] = (value, expires_at)
             self._last_known_device[key] = value
-
-    def _schedule_delayed_refresh(self) -> None:
-        """Refresh after a short delay so eventual-consistency lag does not revert state."""
-        if self.hass is None:
-            return
-
-        if self._cancel_pending_refresh is not None:
-            self._cancel_pending_refresh()
-
-        @callback
-        def _async_handle_refresh(_: datetime) -> None:
-            """Trigger a background refresh after the delay expires."""
-            self._cancel_pending_refresh = None
-            self.hass.async_create_task(self._async_refresh_after_command())
-
-        self._cancel_pending_refresh = async_call_later(
-            self.hass,
-            _REFRESH_DELAY_SECONDS,
-            _async_handle_refresh,
-        )
-
-    async def _async_refresh_after_command(self) -> None:
-        """Run one delayed refresh after a command."""
-        await self.coordinator.async_request_refresh()
-        self._find_device()
-        self._clear_expired_overrides()
 
     def _update_capabilities(self, device: dict[str, Any]) -> None:
         """Update optional features based on the current device payload."""
@@ -286,13 +254,6 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
         """Turn off the AC."""
         await self._async_update_device(power="OFF")
 
-    async def async_will_remove_from_hass(self) -> None:
-        """Cancel any scheduled refresh callbacks when the entity is removed."""
-        if self._cancel_pending_refresh is not None:
-            self._cancel_pending_refresh()
-            self._cancel_pending_refresh = None
-        await super().async_will_remove_from_hass()
-
     async def _async_update_device(
         self,
         power: str | None = None,
@@ -349,5 +310,6 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
 
         self.async_write_ha_state()
 
-        # Delay refreshes slightly to avoid stale API payloads reverting the UI.
-        self._schedule_delayed_refresh()
+        # Delay refreshes slightly to avoid stale API payloads reverting the UI,
+        # but collapse rapid command bursts into one coordinator refresh.
+        self.coordinator.async_schedule_post_command_refresh()
