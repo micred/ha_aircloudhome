@@ -6,7 +6,10 @@ import asyncio
 from time import monotonic
 from typing import Any
 
-from custom_components.aircloudhome.const import DOMAIN
+import aiohttp
+
+from custom_components.aircloudhome.api import AirCloudHomeApiClientCommunicationError
+from custom_components.aircloudhome.const import DOMAIN, LOGGER
 from custom_components.aircloudhome.coordinator import AirCloudHomeDataUpdateCoordinator
 from custom_components.aircloudhome.entity import AirCloudHomeEntity
 from custom_components.aircloudhome.entity_utils.climate_mappings import (
@@ -34,7 +37,9 @@ CLIMATE_ENTITY_DESCRIPTION = EntityDescription(
 )
 
 _OPTIMISTIC_OVERRIDE_TTL_SECONDS = 15.0
-_COMMAND_DEBOUNCE_SECONDS = 0.3
+_COMMAND_DEBOUNCE_SECONDS = 1.5
+_COMMAND_RETRY_TIMEOUT_SECONDS = 15.0
+_COMMAND_RETRY_BACKOFF_SECONDS = (1.0, 2.0, 4.0, 5.0)
 
 
 class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
@@ -79,7 +84,6 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
         self._command_worker_task: asyncio.Task[None] | None = None
         self._pending_command_generation = 0
         self._completed_command_generation = 0
-        self._command_waiters: dict[int, list[asyncio.Future[None]]] = {}
         super().__init__(coordinator, entity_description, device_id=self._device_id)
         self._supports_humidity = False
         self._update_capabilities(self._last_known_device)
@@ -222,7 +226,7 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
         # Round to nearest 0.5
         temperature = round(temperature * 2) / 2
 
-        await self._async_update_device(idu_temperature=temperature)
+        await self._async_update_device(power="ON", idu_temperature=temperature)
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         """Set new target HVAC mode."""
@@ -295,12 +299,8 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
         )
         self.async_write_ha_state()
 
-        generation = self._pending_command_generation + 1
-        self._pending_command_generation = generation
-        waiter: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-        self._command_waiters.setdefault(generation, []).append(waiter)
+        self._pending_command_generation += 1
         self._async_ensure_command_worker()
-        await waiter
 
     def _async_ensure_command_worker(self) -> None:
         """Ensure a background task exists to debounce and send device commands."""
@@ -312,40 +312,88 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
 
     async def _async_command_worker(self) -> None:
         """Batch rapid state changes into the minimum number of API writes."""
-        try:
-            while self._completed_command_generation < self._pending_command_generation:
-                generation = self._pending_command_generation
-                await asyncio.sleep(_COMMAND_DEBOUNCE_SECONDS)
+        while self._completed_command_generation < self._pending_command_generation:
+            generation = self._pending_command_generation
+            await asyncio.sleep(_COMMAND_DEBOUNCE_SECONDS)
+            if generation != self._pending_command_generation:
+                continue
+
+            try:
+                command_sent = await self._async_flush_command_with_retry(generation)
+            except Exception as exception:  # noqa: BLE001 - command failures should not fail the original service call
                 if generation != self._pending_command_generation:
                     continue
-
-                await self._async_flush_command()
                 self._completed_command_generation = generation
-                self._async_resolve_command_waiters(generation)
-        except Exception as exception:  # noqa: BLE001 - queued callers must receive any command failure
-            self._completed_command_generation = self._pending_command_generation
-            self._restore_last_reported_device()
-            self.async_write_ha_state()
-            self._async_fail_command_waiters(exception)
-        finally:
-            self._command_worker_task = None
-            if self._completed_command_generation < self._pending_command_generation:
-                self._async_ensure_command_worker()
+                self._async_restore_after_command_failure(exception)
+                continue
 
-    def _async_resolve_command_waiters(self, generation: int) -> None:
-        """Resolve callers whose updates were included in a successful API write."""
-        generations = [key for key in self._command_waiters if key <= generation]
-        for resolved_generation in generations:
-            for waiter in self._command_waiters.pop(resolved_generation, []):
-                if not waiter.done():
-                    waiter.set_result(None)
+            if command_sent:
+                self._completed_command_generation = generation
 
-    def _async_fail_command_waiters(self, exception: Exception) -> None:
-        """Fail every queued caller when the merged API command fails."""
-        for generation in list(self._command_waiters):
-            for waiter in self._command_waiters.pop(generation, []):
-                if not waiter.done():
-                    waiter.set_exception(exception)
+        self._command_worker_task = None
+        if self._completed_command_generation < self._pending_command_generation:
+            self._async_ensure_command_worker()
+
+    async def _async_flush_command_with_retry(self, generation: int) -> bool:
+        """Send the pending command, retrying transient rate limits in the background."""
+        retry_started_at: float | None = None
+        retry_index = 0
+
+        while generation == self._pending_command_generation:
+            try:
+                await self._async_flush_command()
+            except Exception as exception:
+                if generation != self._pending_command_generation:
+                    return False
+
+                if not self._is_rate_limit_exception(exception):
+                    raise
+
+                now = monotonic()
+                retry_started_at = now if retry_started_at is None else retry_started_at
+                if now - retry_started_at >= _COMMAND_RETRY_TIMEOUT_SECONDS:
+                    raise
+
+                retry_delay = self._retry_delay(exception, retry_index)
+                retry_index += 1
+                await asyncio.sleep(min(retry_delay, _COMMAND_RETRY_TIMEOUT_SECONDS - (now - retry_started_at)))
+                continue
+            else:
+                return True
+
+        return False
+
+    def _async_restore_after_command_failure(self, exception: Exception) -> None:
+        """Log a failed background command and restore the last API-reported state."""
+        device_id = self._device_id
+        self._restore_last_reported_device()
+        self.async_write_ha_state()
+        LOGGER.warning("Failed to control AirCloudHome device %s: %s", device_id, exception)
+
+    @staticmethod
+    def _is_rate_limit_exception(exception: Exception) -> bool:
+        """Return if an exception looks like an API rate-limit failure."""
+        if isinstance(exception, aiohttp.ClientResponseError):
+            return exception.status == 429
+
+        if isinstance(exception, AirCloudHomeApiClientCommunicationError):
+            message = str(exception)
+            return "429" in message or "Too Many Requests" in message
+
+        return False
+
+    @staticmethod
+    def _retry_delay(exception: Exception, retry_index: int) -> float:
+        """Return retry delay from Retry-After or a capped backoff sequence."""
+        if isinstance(exception, aiohttp.ClientResponseError) and exception.headers is not None:
+            retry_after = exception.headers.get("Retry-After")
+            if retry_after is not None:
+                try:
+                    return max(0.0, float(retry_after))
+                except ValueError:
+                    pass
+
+        return _COMMAND_RETRY_BACKOFF_SECONDS[min(retry_index, len(_COMMAND_RETRY_BACKOFF_SECONDS) - 1)]
 
     async def _async_flush_command(self) -> None:
         """Send the merged optimistic state to the API."""
