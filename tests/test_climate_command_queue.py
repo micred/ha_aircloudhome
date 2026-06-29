@@ -10,6 +10,7 @@ import aiohttp
 import pytest
 from yarl import URL
 
+from custom_components.aircloudhome.api import AirCloudHomeApiClientCommunicationError
 from custom_components.aircloudhome.climate import air_conditioning
 from custom_components.aircloudhome.climate.air_conditioning import (
     CLIMATE_ENTITY_DESCRIPTION,
@@ -229,3 +230,36 @@ async def test_retry_timeout_restores_last_reported_state(hass: Any) -> None:
     await asyncio.sleep(0.12)
 
     assert entity.target_temperature == 22.0
+
+
+async def test_transport_disconnect_after_429_keeps_retrying(hass: Any) -> None:
+    """The cloud may disconnect while a previous command is still finishing."""
+    calls = 0
+
+    async def async_control_device(**kwargs: Any) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise aiohttp.ClientResponseError(
+                aiohttp.RequestInfo(
+                    url=URL("https://example.test"), method="PUT", headers={}, real_url=URL("https://example.test")
+                ),
+                (),
+                status=429,
+                message="Too Many Requests",
+            )
+        if calls == 2:
+            msg = "Error fetching information - Server disconnected"
+            raise AirCloudHomeApiClientCommunicationError(msg)
+        return {}
+
+    client = Mock()
+    client.async_control_device = async_control_device
+    entity = _entity(client, hass)
+
+    await entity.async_set_temperature(**{ATTR_TEMPERATURE: 24.0})
+    await asyncio.sleep(0.08)
+
+    assert calls == 3
+    assert entity.target_temperature == 24.0
+    entity.coordinator.async_schedule_post_command_refresh.assert_called_once()

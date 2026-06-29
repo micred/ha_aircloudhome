@@ -346,7 +346,7 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
                 if generation != self._pending_command_generation:
                     return False
 
-                if not self._is_rate_limit_exception(exception):
+                if not self._is_command_retry_exception(exception, retry_started_at is not None):
                     raise
 
                 now = monotonic()
@@ -381,6 +381,14 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
             return "429" in message or "Too Many Requests" in message
 
         return False
+
+    @classmethod
+    def _is_command_retry_exception(cls, exception: Exception, retry_active: bool) -> bool:
+        """Return if a control-command failure should stay in the retry loop."""
+        if cls._is_rate_limit_exception(exception):
+            return True
+
+        return retry_active and isinstance(exception, AirCloudHomeApiClientCommunicationError)
 
     @staticmethod
     def _retry_delay(exception: Exception, retry_index: int) -> float:
