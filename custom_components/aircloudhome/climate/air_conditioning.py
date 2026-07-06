@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
+from dataclasses import dataclass
 from time import monotonic
 from typing import Any
 
@@ -40,6 +42,20 @@ _OPTIMISTIC_OVERRIDE_TTL_SECONDS = 15.0
 _COMMAND_DEBOUNCE_SECONDS = 1.5
 _COMMAND_RETRY_TIMEOUT_SECONDS = 15.0
 _COMMAND_RETRY_BACKOFF_SECONDS = (1.0, 2.0, 4.0, 5.0)
+_PENDING_CONFIRMATION_TIMEOUT_SECONDS = 40.0
+_PENDING_CONFIRMATION_RESEND_SECONDS = 10.0
+_PENDING_CONFIRMATION_MAX_RESENDS = 2
+
+
+@dataclass
+class _PendingConfirmation:
+    """Track a control command accepted by the API but not yet reflected in data."""
+
+    generation: int
+    desired: dict[str, Any]
+    accepted_at: float
+    last_resend_at: float
+    resend_count: int = 0
 
 
 class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
@@ -82,6 +98,8 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
         self._last_known_device = dict(device)
         self._optimistic_overrides: dict[str, tuple[Any, float]] = {}
         self._command_worker_task: asyncio.Task[None] | None = None
+        self._pending_confirmation: _PendingConfirmation | None = None
+        self._pending_confirmation_resend_task: asyncio.Task[None] | None = None
         self._pending_command_generation = 0
         self._completed_command_generation = 0
         super().__init__(coordinator, entity_description, device_id=self._device_id)
@@ -91,12 +109,18 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
     def _clear_expired_overrides(self) -> None:
         """Drop optimistic overrides once the API has had enough time to catch up."""
         now = monotonic()
-        expired_keys = [key for key, (_, expires_at) in self._optimistic_overrides.items() if expires_at <= now]
+        pending_keys = set(self._pending_confirmation.desired) if self._pending_confirmation is not None else set()
+        expired_keys = [
+            key
+            for key, (_, expires_at) in self._optimistic_overrides.items()
+            if key not in pending_keys and expires_at <= now
+        ]
         for key in expired_keys:
             self._optimistic_overrides.pop(key, None)
 
     def _restore_last_reported_device(self) -> None:
         """Restore the last device payload received from the coordinator."""
+        self._clear_pending_confirmation()
         self._optimistic_overrides.clear()
         self._last_known_device = dict(self._last_reported_device)
         self._update_capabilities(self._last_known_device)
@@ -104,6 +128,8 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
     def _merge_device_with_overrides(self, device: dict[str, Any]) -> dict[str, Any]:
         """Return the device payload with any active optimistic updates applied."""
         self._clear_expired_overrides()
+        if self._pending_confirmation is not None:
+            self._resolve_pending_confirmation(device)
 
         resolved_keys = [key for key, (value, _) in self._optimistic_overrides.items() if device.get(key) == value]
         for key in resolved_keys:
@@ -122,6 +148,114 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
                 continue
             self._optimistic_overrides[key] = (value, expires_at)
             self._last_known_device[key] = value
+
+    def _pending_reported_values(self, device: dict[str, Any]) -> dict[str, Any]:
+        """Return reported values relevant to the current pending confirmation."""
+        if self._pending_confirmation is None:
+            return {}
+        return {key: device.get(key) for key in self._pending_confirmation.desired}
+
+    def _clear_pending_confirmation(self) -> None:
+        """Clear any pending confirmation and cancel a queued confirmation resend."""
+        self._pending_confirmation = None
+        if self._pending_confirmation_resend_task is not None and not self._pending_confirmation_resend_task.done():
+            self._pending_confirmation_resend_task.cancel()
+        self._pending_confirmation_resend_task = None
+
+    def _mark_pending_confirmation(self, generation: int, desired: dict[str, Any]) -> None:
+        """Remember that an accepted command still needs coordinator confirmation."""
+        self._clear_pending_confirmation()
+        if not desired:
+            return
+
+        now = monotonic()
+        self._pending_confirmation = _PendingConfirmation(
+            generation=generation,
+            desired=dict(desired),
+            accepted_at=now,
+            last_resend_at=now,
+        )
+        LOGGER.warning(
+            "AirCloudHome device %s command accepted but still waiting for cloud confirmation: "
+            "generation=%s desired=%s reported=%s resend_count=%s",
+            self._device_id,
+            generation,
+            desired,
+            self._pending_reported_values(self._last_reported_device),
+            0,
+        )
+
+    def _resolve_pending_confirmation(self, device: dict[str, Any]) -> None:
+        """Confirm, resend, or roll back a pending accepted command."""
+        pending = self._pending_confirmation
+        if pending is None:
+            return
+
+        reported = {key: device.get(key) for key in pending.desired}
+        if all(reported.get(key) == value for key, value in pending.desired.items()):
+            self._clear_pending_confirmation()
+            return
+
+        now = monotonic()
+        if now - pending.accepted_at >= _PENDING_CONFIRMATION_TIMEOUT_SECONDS:
+            self._timeout_pending_confirmation(device, pending, reported)
+            return
+
+        self._schedule_pending_confirmation_resend(pending, reported)
+
+    def _timeout_pending_confirmation(
+        self,
+        device: dict[str, Any],
+        pending: _PendingConfirmation,
+        reported: dict[str, Any],
+    ) -> None:
+        """Roll back optimistic state after a command does not converge."""
+        LOGGER.warning(
+            "AirCloudHome device %s confirmation timed out; rolled back to cloud-reported state: "
+            "generation=%s desired=%s reported=%s resend_count=%s",
+            self._device_id,
+            pending.generation,
+            pending.desired,
+            reported,
+            pending.resend_count,
+        )
+        self._clear_pending_confirmation()
+        self._optimistic_overrides.clear()
+        self._last_known_device = dict(device)
+        self._update_capabilities(device)
+        self.async_write_ha_state()
+
+    def _schedule_pending_confirmation_resend(
+        self,
+        pending: _PendingConfirmation,
+        reported: dict[str, Any],
+    ) -> None:
+        """Schedule a conservative resend for stale coordinator data."""
+        if self.hass is None:
+            return
+        if pending.resend_count >= _PENDING_CONFIRMATION_MAX_RESENDS:
+            return
+        if self._pending_confirmation_resend_task is not None and not self._pending_confirmation_resend_task.done():
+            return
+
+        LOGGER.warning(
+            "AirCloudHome device %s still reports different values; scheduling command resend: "
+            "generation=%s desired=%s reported=%s resend_count=%s",
+            self._device_id,
+            pending.generation,
+            pending.desired,
+            reported,
+            pending.resend_count + 1,
+        )
+        self._pending_confirmation_resend_task = self.hass.async_create_task(
+            self._async_resend_pending_confirmation(pending.generation)
+        )
+
+    def _pending_confirmation_device(self, pending: _PendingConfirmation) -> dict[str, Any]:
+        """Build a device payload with pending desired values over latest reported data."""
+        device = dict(self._last_reported_device)
+        device.update(pending.desired)
+        return device
 
     def _update_capabilities(self, device: dict[str, Any]) -> None:
         """Update optional features based on the current device payload."""
@@ -276,6 +410,10 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
         """Allow any queued device command to finish before removal."""
         if self._command_worker_task is not None and not self._command_worker_task.done():
             await self._command_worker_task
+        if self._pending_confirmation_resend_task is not None and not self._pending_confirmation_resend_task.done():
+            self._pending_confirmation_resend_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._pending_confirmation_resend_task
         await super().async_will_remove_from_hass()
 
     async def _async_update_device(
@@ -289,6 +427,7 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
     ) -> None:
         """Apply optimistic update and schedule a debounced API command."""
         # Show state change immediately without waiting for the API round-trip.
+        self._clear_pending_confirmation()
         self._apply_optimistic_updates(
             power=power,
             mode=mode,
@@ -341,7 +480,7 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
 
         while generation == self._pending_command_generation:
             try:
-                await self._async_flush_command()
+                await self._async_flush_command(generation)
             except Exception as exception:
                 if generation != self._pending_command_generation:
                     return False
@@ -403,10 +542,61 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
 
         return _COMMAND_RETRY_BACKOFF_SECONDS[min(retry_index, len(_COMMAND_RETRY_BACKOFF_SECONDS) - 1)]
 
-    async def _async_flush_command(self) -> None:
+    async def _async_resend_pending_confirmation(self, generation: int) -> None:
+        """Resend an accepted command that coordinator data still has not confirmed."""
+        try:
+            pending = self._pending_confirmation
+            if pending is None or pending.generation != generation:
+                return
+
+            resend_delay = max(0.0, _PENDING_CONFIRMATION_RESEND_SECONDS - (monotonic() - pending.last_resend_at))
+            if resend_delay > 0:
+                await asyncio.sleep(resend_delay)
+
+            pending = self._pending_confirmation
+            if pending is None or pending.generation != generation:
+                return
+            if pending.resend_count >= _PENDING_CONFIRMATION_MAX_RESENDS:
+                return
+            if monotonic() - pending.accepted_at >= _PENDING_CONFIRMATION_TIMEOUT_SECONDS:
+                return
+
+            pending.resend_count += 1
+            pending.last_resend_at = monotonic()
+            await self._async_send_command(self._pending_confirmation_device(pending))
+            self.coordinator.async_schedule_post_command_refresh()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exception:  # noqa: BLE001 - resend failures are logged but keep pending confirmation bounded
+            pending = self._pending_confirmation
+            LOGGER.warning(
+                "Failed to resend AirCloudHome device %s pending command: generation=%s desired=%s "
+                "reported=%s resend_count=%s exception=%s",
+                self._device_id,
+                generation,
+                pending.desired if pending is not None else {},
+                self._pending_reported_values(self._last_reported_device),
+                pending.resend_count if pending is not None else 0,
+                exception,
+            )
+        finally:
+            if self._pending_confirmation_resend_task is asyncio.current_task():
+                self._pending_confirmation_resend_task = None
+
+    async def _async_flush_command(self, generation: int) -> None:
         """Send the merged optimistic state to the API."""
         device = self._device
+        desired = {key: value for key, (value, _) in self._optimistic_overrides.items()}
 
+        await self._async_send_command(device)
+        self._mark_pending_confirmation(generation, desired)
+
+        # Delay refreshes slightly to avoid stale API payloads reverting the UI,
+        # but collapse rapid command bursts into one coordinator refresh.
+        self.coordinator.async_schedule_post_command_refresh()
+
+    async def _async_send_command(self, device: dict[str, Any]) -> None:
+        """Send a full device control payload to the API."""
         effective_power = device.get("power", "ON")
         effective_mode = device.get("mode", "AUTO")
         # humidity is only valid for DRY / DRY_COOL modes; sending it in other modes causes a 400 error
@@ -427,7 +617,3 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
             idu_temperature=device.get("iduTemperature", 22.0),
             humidity=resolved_humidity,
         )
-
-        # Delay refreshes slightly to avoid stale API payloads reverting the UI,
-        # but collapse rapid command bursts into one coordinator refresh.
-        self.coordinator.async_schedule_post_command_refresh()
