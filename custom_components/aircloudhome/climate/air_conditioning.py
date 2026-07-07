@@ -175,7 +175,7 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
             accepted_at=now,
             last_resend_at=now,
         )
-        LOGGER.warning(
+        LOGGER.debug(
             "AirCloudHome device %s command accepted but still waiting for cloud confirmation: "
             "generation=%s desired=%s reported=%s resend_count=%s",
             self._device_id,
