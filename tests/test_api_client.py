@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from custom_components.aircloudhome.api import API_BASE_URLS, AirCloudHomeApiClient, AirCloudHomeRegion
-from custom_components.aircloudhome.api.client import normalize_device_list
+from custom_components.aircloudhome.api.client import normalize_device_list, normalize_energy_consumption
 
 pytestmark = pytest.mark.unit
 
@@ -112,3 +113,45 @@ def test_normalize_device_drops_placeholder_serial(serial_number: Any) -> None:
     """Masked or missing serial numbers are not exposed in device info."""
     (normalized,) = normalize_device_list([{"id": 1, "serialNumber": serial_number}])
     assert "serialNumber" not in normalized
+
+
+async def test_energy_consumption_request() -> None:
+    """The summary is requested per family for an inclusive date range."""
+    session = _session({"individualRacsData": [{"racId": "116377", "energyConsumed": "12.5"}]})
+    client = _client(session, AirCloudHomeRegion.GLOBAL)
+    client._access_token = "access"  # noqa: SLF001
+
+    consumption = await client.async_get_energy_consumption(205606, date(2026, 1, 1), date(2026, 11, 4))
+
+    assert consumption == {116377: 12.5}
+    call = session.request.await_args.kwargs
+    assert call["method"] == "post"
+    assert call["url"] == (
+        "https://api-global-prod.aircloudhome.com/rac/energy-consumptions/summary/v3?familyId=205606"
+    )
+    assert call["json"] == {"from": "2026-01-01", "to": "2026-11-04"}
+
+
+@pytest.mark.parametrize(
+    ("response", "expected"),
+    [
+        (
+            {
+                "allRacsData": {"energyConsumed": 30.0},
+                "individualRacsData": [
+                    {"racId": 1, "racName": "Living", "energyConsumed": 10.25, "cost": 3.1},
+                    {"racId": 2, "energyConsumed": 0},
+                ],
+            },
+            {1: 10.25, 2: 0.0},
+        ),
+        ({"individualRacsData": [{"racId": 1}, {"energyConsumed": 5}, {"racId": "x", "energyConsumed": 1}, 7]}, {}),
+        ({"individualRacsData": None}, {}),
+        ([], {}),
+        (None, {}),
+    ],
+    ids=["valid", "incomplete-items", "no-list", "not-a-dict", "empty"],
+)
+def test_normalize_energy_consumption(response: Any, expected: dict[int, float]) -> None:
+    """Only complete per-unit records are kept."""
+    assert normalize_energy_consumption(response) == expected

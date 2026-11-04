@@ -11,7 +11,7 @@ https://developers.home-assistant.io/docs/api_lib_index
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 import logging
 import re
@@ -261,6 +261,41 @@ class AirCloudHomeApiClient:
             headers={"Authorization": f"Bearer {self._access_token}"},
         )
         return normalize_device_list(response)
+
+    async def async_get_energy_consumption(
+        self,
+        family_id: int,
+        from_date: date,
+        to_date: date,
+    ) -> dict[int, float]:
+        """
+        Get the energy consumed by each unit of a family group.
+
+        Args:
+            family_id: The family group ID.
+            from_date: First day of the period (inclusive).
+            to_date: Last day of the period (inclusive).
+
+        Returns:
+            Energy consumed in kWh over the period, keyed by device ID
+            (``racId``, the ``id`` from idu-list). See
+            ``normalize_energy_consumption``.
+
+        Raises:
+            AirCloudHomeApiClientAuthenticationError: If authentication fails.
+            AirCloudHomeApiClientCommunicationError: If communication fails.
+            AirCloudHomeApiClientError: For other API errors.
+
+        """
+        await self._async_ensure_valid_token()
+
+        response = await self._api_wrapper(
+            method="post",
+            url=f"{self._base_url}/rac/energy-consumptions/summary/v3?familyId={family_id}",
+            data={"from": from_date.isoformat(), "to": to_date.isoformat()},
+            headers={"Authorization": f"Bearer {self._access_token}"},
+        )
+        return normalize_energy_consumption(response)
 
     async def async_control_device(
         self,
@@ -542,3 +577,33 @@ def _normalize_device(item: dict[str, Any]) -> dict[str, Any]:
         device["serialNumber"] = serial_number
 
     return device
+
+
+def normalize_energy_consumption(response: Any) -> dict[int, float]:
+    """
+    Extract per-unit energy consumption from an energy summary response.
+
+    Only ``individualRacsData`` entries with a numeric ``racId`` and
+    ``energyConsumed`` are kept; the account-wide ``allRacsData`` total and
+    cost / budget fields are ignored.
+
+    Args:
+        response: The decoded JSON response.
+
+    Returns:
+        Energy consumed in kWh keyed by device ID.
+
+    """
+    items = response.get("individualRacsData") if isinstance(response, dict) else None
+    if not isinstance(items, list):
+        return {}
+
+    consumption: dict[int, float] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            consumption[int(item["racId"])] = float(item["energyConsumed"])
+        except (KeyError, TypeError, ValueError):
+            continue
+    return consumption
