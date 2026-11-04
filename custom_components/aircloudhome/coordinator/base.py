@@ -11,15 +11,22 @@ https://developers.home-assistant.io/docs/integration_fetching_data#coordinated-
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from custom_components.aircloudhome.api import AirCloudHomeApiClientAuthenticationError, AirCloudHomeApiClientError
 from custom_components.aircloudhome.const import LOGGER
+from homeassistant.core import CALLBACK_TYPE, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 if TYPE_CHECKING:
     from custom_components.aircloudhome.data import AirCloudHomeConfigEntry
+
+# The cloud needs a few seconds before idu-list reflects a control command, so
+# refreshing immediately would only fetch (and briefly show) the old state.
+POST_COMMAND_REFRESH_DELAY_SECONDS = 10.0
 
 
 class AirCloudHomeDataUpdateCoordinator(DataUpdateCoordinator):
@@ -60,6 +67,36 @@ class AirCloudHomeDataUpdateCoordinator(DataUpdateCoordinator):
         # device_info = await self.config_entry.runtime_data.client.get_device_info()
         # self._device_id = device_info["id"]
         LOGGER.debug("Coordinator setup complete for %s", self.config_entry.entry_id)
+
+    _cancel_post_command_refresh: CALLBACK_TYPE | None = None
+
+    @callback
+    def async_schedule_post_command_refresh(self) -> None:
+        """
+        Schedule one refresh shortly after a device command.
+
+        Each call restarts the delay, so a burst of commands (one or several
+        units) results in a single refresh after the last one.
+        """
+        self.async_cancel_scheduled_post_command_refresh()
+
+        @callback
+        def _async_refresh(_now: datetime) -> None:
+            self._cancel_post_command_refresh = None
+            self.hass.async_create_task(self.async_request_refresh())
+
+        self._cancel_post_command_refresh = async_call_later(
+            self.hass,
+            POST_COMMAND_REFRESH_DELAY_SECONDS,
+            _async_refresh,
+        )
+
+    @callback
+    def async_cancel_scheduled_post_command_refresh(self) -> None:
+        """Cancel a refresh scheduled by ``async_schedule_post_command_refresh``."""
+        if self._cancel_post_command_refresh is not None:
+            self._cancel_post_command_refresh()
+            self._cancel_post_command_refresh = None
 
     async def _async_update_data(self) -> Any:
         """

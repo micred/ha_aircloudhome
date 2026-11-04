@@ -1,7 +1,18 @@
-"""Climate entity for aircloudhome AC devices."""
+"""
+Climate entity for aircloudhome AC devices.
+
+The entity reads the latest coordinator data on every state access, so changes
+made outside Home Assistant (remote, mobile app) show up after the next poll.
+
+The AirCloud Home cloud takes a few seconds to reflect a control command, so
+commanded values are kept as optimistic overrides until coordinator data
+reports them (or ``_OPTIMISTIC_OVERRIDE_TTL_SECONDS`` passes). One coordinator
+refresh is scheduled shortly after the last command of a burst.
+"""
 
 from __future__ import annotations
 
+from time import monotonic
 from typing import Any
 
 from custom_components.aircloudhome.coordinator import AirCloudHomeDataUpdateCoordinator
@@ -29,15 +40,13 @@ CLIMATE_ENTITY_DESCRIPTION = EntityDescription(
     translation_key="room_air_conditioner",
 )
 
+_OPTIMISTIC_OVERRIDE_TTL_SECONDS = 15.0
+
 
 class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
     """Climate entity for AirCloud Home AC device."""
 
-    _attr_temperature_unit = UnitOfTemperature.CELSIUS
-    _attr_min_temp = 16.0
-    _attr_max_temp = 32.0
-    _attr_target_temperature_step = 0.5
-    _attr_supported_features = (
+    _base_supported_features = (
         ClimateEntityFeature.TARGET_TEMPERATURE
         | ClimateEntityFeature.FAN_MODE
         | ClimateEntityFeature.SWING_MODE
@@ -45,6 +54,11 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
         | ClimateEntityFeature.TURN_OFF
         | ClimateEntityFeature.TURN_ON
     )
+    _attr_temperature_unit = UnitOfTemperature.CELSIUS
+    _attr_min_temp = 16.0
+    _attr_max_temp = 32.0
+    _attr_target_temperature_step = 0.5
+    _attr_supported_features = _base_supported_features
     _attr_hvac_modes = [
         HVACMode.HEAT,
         HVACMode.COOL,
@@ -64,13 +78,67 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
         device: dict[str, Any],
     ) -> None:
         """Initialize the climate entity."""
-        super().__init__(coordinator, entity_description, device_id=str(device["id"]))
-        self._device = device
+        self._device_id = str(device["id"])
+        self._last_known_device = dict(device)
+        self._optimistic_overrides: dict[str, tuple[Any, float]] = {}
+        super().__init__(coordinator, entity_description, device_id=self._device_id)
+        self._supports_humidity = False
+        self._update_capabilities(self._last_known_device)
+
+    def _clear_expired_overrides(self) -> None:
+        """Drop optimistic overrides once the API has had enough time to catch up."""
+        now = monotonic()
+        expired_keys = [key for key, (_, expires_at) in self._optimistic_overrides.items() if expires_at <= now]
+        for key in expired_keys:
+            self._optimistic_overrides.pop(key, None)
+
+    def _merge_device_with_overrides(self, device: dict[str, Any]) -> dict[str, Any]:
+        """Return the device payload with any active optimistic updates applied."""
+        self._clear_expired_overrides()
+
+        resolved_keys = [key for key, (value, _) in self._optimistic_overrides.items() if device.get(key) == value]
+        for key in resolved_keys:
+            self._optimistic_overrides.pop(key, None)
+
+        merged_device = dict(device)
+        for key, (value, _) in self._optimistic_overrides.items():
+            merged_device[key] = value
+        return merged_device
+
+    def _apply_optimistic_updates(self, **updates: Any) -> None:
+        """Keep recently applied device values until the coordinator reflects them."""
+        expires_at = monotonic() + _OPTIMISTIC_OVERRIDE_TTL_SECONDS
+        for key, value in updates.items():
+            if value is None:
+                continue
+            self._optimistic_overrides[key] = (value, expires_at)
+            self._last_known_device[key] = value
+
+    def _update_capabilities(self, device: dict[str, Any]) -> None:
+        """Update optional features based on the current device payload."""
         self._supports_humidity = "humidity" in device
+        self._attr_supported_features = self._base_supported_features
         if self._supports_humidity:
             self._attr_supported_features |= ClimateEntityFeature.TARGET_HUMIDITY
             self._attr_min_humidity = 40
             self._attr_max_humidity = 60
+
+    def _find_device(self) -> dict[str, Any] | None:
+        """Return the latest coordinator payload for this device."""
+        devices = self.coordinator.data.get("devices", [])
+        for device in devices:
+            if str(device.get("id")) != self._device_id:
+                continue
+            resolved_device = self._merge_device_with_overrides(device)
+            self._last_known_device = resolved_device
+            self._update_capabilities(resolved_device)
+            return resolved_device
+        return None
+
+    @property
+    def _device(self) -> dict[str, Any]:
+        """Return the current device data, falling back to the last known payload."""
+        return self._find_device() or self._merge_device_with_overrides(self._last_known_device)
 
     def _get_device_info(self) -> DeviceInfo:
         """Get device information for this AC unit."""
@@ -85,7 +153,13 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
     @property
     def available(self) -> bool:
         """Return if entity is available."""
-        return self._device.get("online", False)
+        if not super().available:
+            return False
+
+        if (device := self._find_device()) is None:
+            return False
+
+        return bool(device.get("online", False))
 
     @property
     def current_temperature(self) -> float | None:
@@ -195,14 +269,16 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
         humidity: int | None = None,
     ) -> None:
         """Update device state through the API."""
+        device = self._device
+
         # Use current values for parameters not being updated
-        current_power = self._device.get("power", "ON")
-        current_mode = self._device.get("mode", "AUTO")
-        current_fan_speed = self._device.get("fanSpeed", "AUTO")
-        current_fan_swing = self._device.get("fanSwing", "OFF")
-        current_temp = self._device.get("iduTemperature", 22.0)
+        current_power = device.get("power", "ON")
+        current_mode = device.get("mode", "AUTO")
+        current_fan_speed = device.get("fanSpeed", "AUTO")
+        current_fan_swing = device.get("fanSwing", "OFF")
+        current_temp = device.get("iduTemperature", 22.0)
         # humidity is the target humidity setpoint retrieved from the device, not the measured room humidity.
-        target_humidity_raw = self._device.get("humidity")
+        target_humidity_raw = device.get("humidity")
         target_humidity_setpoint = (
             int(round(target_humidity_raw)) if isinstance(target_humidity_raw, (int, float)) else None
         )
@@ -216,38 +292,29 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
             else None
         )
 
-        try:
-            await self.coordinator.config_entry.runtime_data.client.async_control_device(
-                rac_id=self._device["id"],
-                family_id=self._device["familyId"],
-                power=effective_power,
-                mode=effective_mode,
-                fan_speed=fan_speed or current_fan_speed,
-                fan_swing=fan_swing or current_fan_swing,
-                idu_temperature=idu_temperature if idu_temperature is not None else current_temp,
-                humidity=resolved_humidity,
-            )
+        await self.coordinator.config_entry.runtime_data.client.async_control_device(
+            rac_id=device["id"],
+            family_id=device["familyId"],
+            power=effective_power,
+            mode=effective_mode,
+            fan_speed=fan_speed or current_fan_speed,
+            fan_swing=fan_swing or current_fan_swing,
+            idu_temperature=idu_temperature if idu_temperature is not None else current_temp,
+            humidity=resolved_humidity,
+        )
 
-            # Update local state immediately for responsiveness
-            if power is not None:
-                self._device["power"] = power
-            if mode is not None:
-                self._device["mode"] = mode
-            if fan_speed is not None:
-                self._device["fanSpeed"] = fan_speed
-            if fan_swing is not None:
-                self._device["fanSwing"] = fan_swing
-            if idu_temperature is not None:
-                self._device["iduTemperature"] = idu_temperature
-            if humidity is not None:
-                self._device["humidity"] = humidity
+        # Keep command results visible until the API reports them back.
+        self._apply_optimistic_updates(
+            power=power,
+            mode=mode,
+            fanSpeed=fan_speed,
+            fanSwing=fan_swing,
+            iduTemperature=idu_temperature,
+            humidity=humidity,
+        )
 
-            self.async_write_ha_state()
+        self.async_write_ha_state()
 
-            # Refresh data from coordinator
-            await self.coordinator.async_request_refresh()
-
-        except Exception:
-            self._attr_available = False
-            self.async_write_ha_state()
-            raise
+        # Delay refreshes slightly to avoid stale API payloads reverting the UI,
+        # but collapse rapid command bursts into one coordinator refresh.
+        self.coordinator.async_schedule_post_command_refresh()
