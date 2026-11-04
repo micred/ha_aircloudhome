@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 from unittest.mock import Mock
 
@@ -73,12 +74,31 @@ async def _wait_for_tasks() -> None:
     await asyncio.sleep(0)
 
 
+async def _wait_until(predicate: Any, timeout: float = 1.0) -> None:
+    """Wait until a test predicate is true."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not predicate():
+        if asyncio.get_running_loop().time() >= deadline:
+            raise TimeoutError("Timed out waiting for predicate")
+        await asyncio.sleep(0.005)
+
+
+def _set_reported_temperature(entity: AirCloudHomeAirConditioner, temperature: float) -> None:
+    """Update the coordinator payload as if the API reported a target temperature."""
+    device = _device()
+    device["iduTemperature"] = temperature
+    entity.coordinator.data = {"devices": [device]}
+
+
 @pytest.fixture(autouse=True)
 def fast_command_timing(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep timing-based command tests fast."""
     monkeypatch.setattr(air_conditioning, "_COMMAND_DEBOUNCE_SECONDS", 0.01)
     monkeypatch.setattr(air_conditioning, "_COMMAND_RETRY_TIMEOUT_SECONDS", 0.05, raising=False)
     monkeypatch.setattr(air_conditioning, "_COMMAND_RETRY_BACKOFF_SECONDS", (0.01,), raising=False)
+    monkeypatch.setattr(air_conditioning, "_PENDING_CONFIRMATION_TIMEOUT_SECONDS", 0.2, raising=False)
+    monkeypatch.setattr(air_conditioning, "_PENDING_CONFIRMATION_RESEND_SECONDS", 1.0, raising=False)
+    monkeypatch.setattr(air_conditioning, "_PENDING_CONFIRMATION_MAX_RESENDS", 2, raising=False)
 
 
 async def test_temperature_service_returns_before_cloud_command_completes(hass: Any) -> None:
@@ -263,3 +283,104 @@ async def test_transport_disconnect_after_429_keeps_retrying(hass: Any) -> None:
     assert calls == 3
     assert entity.target_temperature == 24.0
     entity.coordinator.async_schedule_post_command_refresh.assert_called_once()
+
+
+async def test_stale_refresh_keeps_latest_temperature_pending_confirmation(
+    hass: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stale coordinator data must not expire an accepted command before confirmation."""
+    monkeypatch.setattr(air_conditioning, "_OPTIMISTIC_OVERRIDE_TTL_SECONDS", 0.05)
+    calls: list[dict[str, Any]] = []
+
+    async def async_control_device(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        return {}
+
+    client = Mock()
+    client.async_control_device = async_control_device
+    entity = _entity(client, hass)
+
+    await entity.async_set_temperature(**{ATTR_TEMPERATURE: 23.0})
+    await entity.async_set_temperature(**{ATTR_TEMPERATURE: 24.0})
+    await _wait_until(lambda: len(calls) == 1)
+
+    _set_reported_temperature(entity, 22.0)
+    await asyncio.sleep(0.06)
+
+    assert calls[0]["idu_temperature"] == 24.0
+    assert entity.target_temperature == 24.0
+
+
+async def test_matching_refresh_clears_pending_temperature_confirmation(hass: Any) -> None:
+    """A matching coordinator payload confirms the accepted desired state."""
+    calls: list[dict[str, Any]] = []
+
+    async def async_control_device(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        return {}
+
+    client = Mock()
+    client.async_control_device = async_control_device
+    entity = _entity(client, hass)
+
+    await entity.async_set_temperature(**{ATTR_TEMPERATURE: 24.0})
+    await _wait_until(lambda: len(calls) == 1)
+
+    _set_reported_temperature(entity, 24.0)
+    await asyncio.sleep(0.04)
+
+    assert entity.target_temperature == 24.0
+    assert len(calls) == 1
+
+
+async def test_stale_refresh_resends_latest_pending_temperature(hass: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stale reported value should resend the latest accepted desired command."""
+    monkeypatch.setattr(air_conditioning, "_PENDING_CONFIRMATION_RESEND_SECONDS", 0.02, raising=False)
+    calls: list[dict[str, Any]] = []
+
+    async def async_control_device(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        return {}
+
+    client = Mock()
+    client.async_control_device = async_control_device
+    entity = _entity(client, hass)
+
+    await entity.async_set_temperature(**{ATTR_TEMPERATURE: 23.0})
+    await entity.async_set_temperature(**{ATTR_TEMPERATURE: 24.0})
+    await _wait_until(lambda: len(calls) == 1)
+
+    _set_reported_temperature(entity, 22.0)
+    assert entity.target_temperature == 24.0
+    await _wait_until(lambda: len(calls) == 2)
+
+    assert [call["idu_temperature"] for call in calls] == [24.0, 24.0]
+
+
+async def test_confirmation_timeout_rolls_back_to_reported_temperature(
+    hass: Any, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A never-confirmed command should roll back to the reported cloud state with a warning."""
+    monkeypatch.setattr(air_conditioning, "_PENDING_CONFIRMATION_TIMEOUT_SECONDS", 0.03, raising=False)
+    monkeypatch.setattr(air_conditioning, "_PENDING_CONFIRMATION_RESEND_SECONDS", 1.0, raising=False)
+    calls: list[dict[str, Any]] = []
+
+    async def async_control_device(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        return {}
+
+    client = Mock()
+    client.async_control_device = async_control_device
+    entity = _entity(client, hass)
+
+    await entity.async_set_temperature(**{ATTR_TEMPERATURE: 24.0})
+    await _wait_until(lambda: len(calls) == 1)
+
+    _set_reported_temperature(entity, 22.0)
+    await asyncio.sleep(0.04)
+
+    with caplog.at_level(logging.WARNING, logger=air_conditioning.LOGGER.name):
+        assert entity.target_temperature == 22.0
+
+    assert "confirmation timed out" in caplog.text
+    assert entity.async_write_ha_state.call_count >= 2
