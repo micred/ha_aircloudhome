@@ -35,6 +35,7 @@ Uncomment and customize these badges if you want to use them:
 Platform | Description
 -- | --
 `climate` | Air conditioning control (power, mode, temperature, fan speed, swing)
+`sensor` | Optional energy consumption per unit (enable **Energy monitoring** in the options)
 
 ## 🚀 Quick Start
 
@@ -112,6 +113,7 @@ After setup, you can adjust options:
 3. Click **Configure** to adjust:
    - Update interval (how often to refresh data)
    - Enable debug logging
+   - Enable energy monitoring (adds an energy sensor per unit)
 
 You can also **Reconfigure** your credentials and region anytime without removing the integration.
 

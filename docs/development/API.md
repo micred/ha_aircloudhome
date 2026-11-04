@@ -279,3 +279,54 @@ Updates the operating state of an AC unit. All five required fields must be incl
 ```
 
 The response confirms the command was accepted; actual device state change is asynchronous. Poll the IDU list to confirm the updated state.
+
+## Energy Consumption
+
+### Energy Summary
+
+Returns the energy consumed by each unit of a family group over a date range. Used by the optional energy sensors; the integration requests it at most once per hour, from a fixed start date up to today.
+
+- **URL:** `POST /rac/energy-consumptions/summary/v3?familyId={familyId}`
+- **Headers:**
+  - `Authorization: Bearer <access_token>`
+
+**Request body:**
+
+```json
+{
+  "from": "2026-01-01",
+  "to": "2026-11-04"
+}
+```
+
+Both dates are inclusive (`YYYY-MM-DD`).
+
+**Response — 200 OK (abridged):**
+
+```json
+{
+  "allRacsData": {
+    "energyConsumed": 123.45,
+    "cost": 30.86,
+    "currency": "EUR"
+  },
+  "individualRacsData": [
+    {
+      "racId": 10001,
+      "vendorThingId": "JCH-xxxxxxxx",
+      "racName": "Living Room",
+      "energyConsumed": 123.45,
+      "cost": 30.86,
+      "budget": 100.0,
+      "currency": "EUR"
+    }
+  ]
+}
+```
+
+| Field | Description |
+| ----- | ----------- |
+| `racId` | Device ID (`id` from the IDU list) |
+| `energyConsumed` | Energy consumed in the period, in kWh |
+
+Only `individualRacsData[].racId` and `energyConsumed` are used (`normalize_energy_consumption` in `api/client.py`). Verified on the Europe / global API; not yet verified on the Japan API.

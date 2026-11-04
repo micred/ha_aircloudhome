@@ -48,6 +48,16 @@ After initial setup, you can modify settings:
 |--------|---------|-------|-------------|
 | **Update interval (minutes)** | 5 | 1–1440 | How often to poll the cloud API |
 | **Enable debug logging** | Off | — | Enable detailed debug logging for troubleshooting |
+| **Enable energy monitoring** | Off | — | Add an energy consumption sensor for each unit (see below) |
+
+#### Energy Monitoring
+
+When enabled, each AC unit gets an **Energy consumption** sensor (kWh) on the same device as its climate entity. It can be added to the Home Assistant **Energy dashboard** as an individual device.
+
+- The value is the energy consumed from 1 January 2026 up to today, as reported by the AirCloud Home energy summary API, so it only grows.
+- It is refreshed **at most once per hour**, independent of the update interval. That is at most 24 extra requests per day per family group (the default 5-minute interval already makes 288 device requests per day). Nothing is requested while the option is off.
+- If the energy API fails, the last values are kept and the climate entities are not affected.
+- Turning the option off removes the sensors.
 
 ## Entity Configuration
 
