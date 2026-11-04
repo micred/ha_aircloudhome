@@ -97,7 +97,7 @@ Set the operating mode.
 
 ### `climate.set_temperature`
 
-Set the target temperature (16–32°C, 0.5°C increments).
+Set the target temperature (16–32°C, 0.5°C increments). Setting a temperature also turns the unit on, the same as on the remote.
 
 ### `climate.set_fan_mode`
 
@@ -151,6 +151,17 @@ Adjust the update interval in **Configure** → **Update interval (minutes)**:
 
 - Shorter intervals provide more responsive state updates but increase API requests
 - Longer intervals reduce API load but delay state reflection
+
+### How Commands Are Sent
+
+The cloud API is slow to reflect commands and rejects commands sent while a previous one is still being applied. To keep the UI responsive, commands work like this:
+
+1. **Immediate feedback:** the climate entity shows the new value right away; the action returns without waiting for the cloud.
+2. **Debounce:** changes made within 1.5 seconds (for example, clicking the temperature arrows several times) are merged into a single command.
+3. **Retry:** if the cloud answers "too many requests", the command is retried in the background for up to 15 seconds. A newer change replaces a command that is still being retried.
+4. **Confirmation:** the new value stays visible until the cloud reports it. If it still reports the old value, the command is re-sent (up to 2 times, 10 seconds apart). After 40 seconds without confirmation, the entity shows the cloud-reported state again and a warning is logged.
+
+About 10 seconds after the last command, one extra update is fetched so the entity reflects the confirmed state without waiting for the next poll.
 
 ## Diagnostic Data
 
