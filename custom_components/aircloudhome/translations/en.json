@@ -48,11 +48,13 @@
         "description": "Customize how this integration operates.",
         "data": {
           "update_interval_minutes": "Update interval (minutes)",
-          "enable_debugging": "Enable debug logging"
+          "enable_debugging": "Enable debug logging",
+          "enable_energy_monitoring": "Enable energy monitoring"
         },
         "data_description": {
           "update_interval_minutes": "How often to refresh data from the API (1 to 1440 minutes)",
-          "enable_debugging": "Enable detailed debug logging for troubleshooting"
+          "enable_debugging": "Enable detailed debug logging for troubleshooting",
+          "enable_energy_monitoring": "Add an energy consumption sensor for each unit. Consumption is read from the AirCloud Home energy summary API at most once per hour."
         }
       }
     }
@@ -84,6 +86,11 @@
             }
           }
         }
+      }
+    },
+    "sensor": {
+      "energy_consumption": {
+        "name": "Energy consumption"
       }
     }
   },

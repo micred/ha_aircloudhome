@@ -11,15 +11,26 @@ https://developers.home-assistant.io/docs/integration_fetching_data#coordinated-
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from custom_components.aircloudhome.api import AirCloudHomeApiClientAuthenticationError, AirCloudHomeApiClientError
-from custom_components.aircloudhome.const import LOGGER
+from custom_components.aircloudhome.const import (
+    CONF_ENABLE_ENERGY_MONITORING,
+    DEFAULT_ENABLE_ENERGY_MONITORING,
+    ENERGY_MONITORING_START_DATE,
+    LOGGER,
+)
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 if TYPE_CHECKING:
     from custom_components.aircloudhome.data import AirCloudHomeConfigEntry
+
+# Energy figures change slowly, so they are fetched at most this often,
+# independently of the (usually much shorter) device polling interval.
+ENERGY_REFRESH_INTERVAL = timedelta(hours=1)
 
 
 class AirCloudHomeDataUpdateCoordinator(DataUpdateCoordinator):
@@ -42,6 +53,10 @@ class AirCloudHomeDataUpdateCoordinator(DataUpdateCoordinator):
     """
 
     config_entry: AirCloudHomeConfigEntry
+
+    # Last energy consumption fetched (kWh by device ID) and when it was fetched.
+    _energy: dict[int, float] | None = None
+    _energy_fetched_at: datetime | None = None
 
     async def _async_setup(self) -> None:
         """
@@ -84,7 +99,10 @@ class AirCloudHomeDataUpdateCoordinator(DataUpdateCoordinator):
                         "online": bool,
                         "familyId": int,
                     }
-                ]
+                ],
+                "energy": {  # empty unless energy monitoring is enabled
+                    device_id: kWh consumed since ENERGY_MONITORING_START_DATE,
+                },
             }
 
         Raises:
@@ -98,21 +116,25 @@ class AirCloudHomeDataUpdateCoordinator(DataUpdateCoordinator):
             family_groups = await client.async_get_family_groups()
             if not family_groups:
                 LOGGER.warning("No family groups found for user")
-                return {"devices": []}
+                return {"devices": [], "energy": {}}
 
             # Fetch devices from all family groups
             devices = []
+            family_ids: list[int] = []
             for family_group in family_groups:
                 family_id = family_group.get("familyId")
                 if not family_id:
                     LOGGER.warning("Family group missing familyId")
                     continue
 
+                family_ids.append(family_id)
                 idu_list = await client.async_get_idu_list(family_id)
 
                 for device in idu_list:
                     device["familyId"] = family_id
                     devices.append(device)
+
+            energy = await self._async_get_energy(family_ids) if self._energy_monitoring_enabled else {}
         except AirCloudHomeApiClientAuthenticationError as exception:
             LOGGER.warning("Authentication error - %s", exception)
             raise ConfigEntryAuthFailed(
@@ -126,4 +148,46 @@ class AirCloudHomeDataUpdateCoordinator(DataUpdateCoordinator):
                 translation_key="update_failed",
             ) from exception
         else:
-            return {"devices": devices}
+            return {"devices": devices, "energy": energy}
+
+    @property
+    def _energy_monitoring_enabled(self) -> bool:
+        """Return whether the user enabled the optional energy sensors."""
+        return self.config_entry.options.get(CONF_ENABLE_ENERGY_MONITORING, DEFAULT_ENABLE_ENERGY_MONITORING)
+
+    async def _async_get_energy(self, family_ids: list[int]) -> dict[int, float]:
+        """
+        Return energy consumption per device, refreshed at most once per hour.
+
+        Failures other than authentication errors are logged and keep the
+        previous values, so a problem with the energy endpoint never makes the
+        climate entities unavailable. A failed attempt is also not retried
+        before the next refresh interval.
+
+        Args:
+            family_ids: The family groups whose devices are polled.
+
+        Returns:
+            Energy consumed in kWh since ``ENERGY_MONITORING_START_DATE``,
+            keyed by device ID.
+
+        """
+        now = dt_util.utcnow()
+        if self._energy_fetched_at is not None and now - self._energy_fetched_at < ENERGY_REFRESH_INTERVAL:
+            return self._energy or {}
+
+        self._energy_fetched_at = now
+        client = self.config_entry.runtime_data.client
+        today = dt_util.now().date()
+        energy: dict[int, float] = {}
+        try:
+            for family_id in family_ids:
+                energy |= await client.async_get_energy_consumption(family_id, ENERGY_MONITORING_START_DATE, today)
+        except AirCloudHomeApiClientAuthenticationError:
+            raise
+        except AirCloudHomeApiClientError as exception:
+            LOGGER.warning("Could not update energy consumption, keeping previous values: %s", exception)
+            return self._energy or {}
+
+        self._energy = energy
+        return energy

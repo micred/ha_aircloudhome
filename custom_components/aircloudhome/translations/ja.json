@@ -48,11 +48,13 @@
         "description": "このインテグレーションの動作をカスタマイズしてください。",
         "data": {
           "update_interval_minutes": "更新間隔（分）",
-          "enable_debugging": "デバッグログを有効にする"
+          "enable_debugging": "デバッグログを有効にする",
+          "enable_energy_monitoring": "エネルギー監視を有効にする"
         },
         "data_description": {
           "update_interval_minutes": "APIからデータを更新する頻度（1～1440分）",
-          "enable_debugging": "トラブルシューティングの詳細なデバッグログを有効にする"
+          "enable_debugging": "トラブルシューティングの詳細なデバッグログを有効にする",
+          "enable_energy_monitoring": "ユニットごとに消費電力量センサーを追加します。消費電力量は AirCloud Home のエネルギーサマリー API から最大 1 時間に 1 回取得します。"
         }
       }
     }
@@ -84,6 +86,11 @@
             }
           }
         }
+      }
+    },
+    "sensor": {
+      "energy_consumption": {
+        "name": "消費電力量"
       }
     }
   },

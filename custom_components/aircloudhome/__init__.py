@@ -33,6 +33,7 @@ if TYPE_CHECKING:
 
 PLATFORMS: list[Platform] = [
     Platform.CLIMATE,
+    Platform.SENSOR,  # Energy sensors; only populated when enabled in the options
 ]
 
 # This integration is configured via config entries only
