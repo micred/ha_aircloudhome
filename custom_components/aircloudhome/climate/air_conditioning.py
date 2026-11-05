@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import datetime
 from time import monotonic
 from typing import Any
 
@@ -48,8 +49,10 @@ from custom_components.aircloudhome.entity_utils.climate_mappings import (
 from homeassistant.components.climate import ClimateEntity
 from homeassistant.components.climate.const import PRESET_NONE, ClimateEntityFeature, HVACMode
 from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
+from homeassistant.core import CALLBACK_TYPE, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import EntityDescription
+from homeassistant.helpers.event import async_call_later
 
 # Climate entity description for AC units
 CLIMATE_ENTITY_DESCRIPTION = EntityDescription(
@@ -120,6 +123,7 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
         self._command_worker_task: asyncio.Task[None] | None = None
         self._pending_confirmation: _PendingConfirmation | None = None
         self._pending_confirmation_resend_task: asyncio.Task[None] | None = None
+        self._cancel_pending_confirmation_deadline: CALLBACK_TYPE | None = None
         self._pending_command_generation = 0
         self._completed_command_generation = 0
         super().__init__(coordinator, entity_description, device_id=self._device_id)
@@ -181,6 +185,9 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
         if self._pending_confirmation_resend_task is not None and not self._pending_confirmation_resend_task.done():
             self._pending_confirmation_resend_task.cancel()
         self._pending_confirmation_resend_task = None
+        if self._cancel_pending_confirmation_deadline is not None:
+            self._cancel_pending_confirmation_deadline()
+            self._cancel_pending_confirmation_deadline = None
 
     def _mark_pending_confirmation(self, generation: int, desired: dict[str, Any]) -> None:
         """Remember that an accepted command still needs coordinator confirmation."""
@@ -195,6 +202,14 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
             accepted_at=now,
             last_resend_at=now,
         )
+        # Polls only reach the entity when something changes, so do not rely on
+        # one arriving after the deadline: check it explicitly.
+        if self.hass is not None:
+            self._cancel_pending_confirmation_deadline = async_call_later(
+                self.hass,
+                _PENDING_CONFIRMATION_TIMEOUT_SECONDS,
+                self._async_pending_confirmation_deadline,
+            )
         LOGGER.debug(
             "AirCloudHome device %s command accepted but still waiting for cloud confirmation: "
             "generation=%s desired=%s reported=%s resend_count=%s",
@@ -222,6 +237,25 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
             return
 
         self._schedule_pending_confirmation_resend(pending, reported)
+
+    @callback
+    def _async_pending_confirmation_deadline(self, _now: datetime) -> None:
+        """Roll back a command that the cloud still has not confirmed in time."""
+        self._cancel_pending_confirmation_deadline = None
+        pending = self._pending_confirmation
+        if pending is None:
+            return
+
+        device = next(
+            (d for d in self.coordinator.data.get("devices", []) if str(d.get("id")) == self._device_id),
+            self._last_reported_device,
+        )
+        reported = {key: device.get(key) for key in pending.desired}
+        if reported == pending.desired:
+            self._clear_pending_confirmation()
+            self.async_write_ha_state()
+            return
+        self._timeout_pending_confirmation(device, pending, reported)
 
     def _timeout_pending_confirmation(
         self,
@@ -427,6 +461,9 @@ class AirCloudHomeAirConditioner(ClimateEntity, AirCloudHomeEntity):
         """Allow any queued device command to finish before removal."""
         if self._command_worker_task is not None and not self._command_worker_task.done():
             await self._command_worker_task
+        if self._cancel_pending_confirmation_deadline is not None:
+            self._cancel_pending_confirmation_deadline()
+            self._cancel_pending_confirmation_deadline = None
         if self._pending_confirmation_resend_task is not None and not self._pending_confirmation_resend_task.done():
             self._pending_confirmation_resend_task.cancel()
             with suppress(asyncio.CancelledError):

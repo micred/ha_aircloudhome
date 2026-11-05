@@ -83,13 +83,26 @@ class AirCloudHomeDataUpdateCoordinator(DataUpdateCoordinator):
         @callback
         def _async_refresh(_now: datetime) -> None:
             self._cancel_post_command_refresh = None
-            self.hass.async_create_task(self.async_request_refresh())
+            self.hass.async_create_task(self._async_refresh_after_command())
 
         self._cancel_post_command_refresh = async_call_later(
             self.hass,
             POST_COMMAND_REFRESH_DELAY_SECONDS,
             _async_refresh,
         )
+
+    async def _async_refresh_after_command(self) -> None:
+        """
+        Refresh, and notify entities even if the cloud still reports the old state.
+
+        With ``always_update=False`` an unchanged payload notifies nobody, yet an
+        entity waiting for its command to be confirmed must see exactly that
+        stale payload to resend the command or give up on it.
+        """
+        previous = self.data
+        await self.async_refresh()
+        if self.last_update_success and self.data == previous:
+            self.async_update_listeners()
 
     @callback
     def async_cancel_scheduled_post_command_refresh(self) -> None:

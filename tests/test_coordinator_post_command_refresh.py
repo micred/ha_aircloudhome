@@ -32,7 +32,7 @@ async def test_command_burst_triggers_one_delayed_refresh(hass: HomeAssistant) -
     """Several commands in a row lead to a single refresh after the last one."""
     coordinator = _coordinator(hass)
 
-    with patch.object(coordinator, "async_request_refresh", AsyncMock()) as refresh:
+    with patch.object(coordinator, "async_refresh", AsyncMock()) as refresh:
         coordinator.async_schedule_post_command_refresh()
         coordinator.async_schedule_post_command_refresh()
         await _advance(hass, POST_COMMAND_REFRESH_DELAY_SECONDS - 1)
@@ -46,7 +46,7 @@ async def test_cancelled_refresh_does_not_run(hass: HomeAssistant) -> None:
     """Unloading the entry cancels a pending post-command refresh."""
     coordinator = _coordinator(hass)
 
-    with patch.object(coordinator, "async_request_refresh", AsyncMock()) as refresh:
+    with patch.object(coordinator, "async_refresh", AsyncMock()) as refresh:
         coordinator.async_schedule_post_command_refresh()
         coordinator.async_cancel_scheduled_post_command_refresh()
         await _advance(hass, POST_COMMAND_REFRESH_DELAY_SECONDS + 1)
