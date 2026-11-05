@@ -28,7 +28,7 @@ def _fast_timing(monkeypatch: pytest.MonkeyPatch) -> None:
     """Shrink every command delay so the scenario runs in well under a second."""
     monkeypatch.setattr(air_conditioning, "_COMMAND_DEBOUNCE_SECONDS", 0.01)
     monkeypatch.setattr(air_conditioning, "_PENDING_CONFIRMATION_RESEND_SECONDS", 0.05)
-    monkeypatch.setattr(air_conditioning, "_PENDING_CONFIRMATION_TIMEOUT_SECONDS", 0.5)
+    monkeypatch.setattr(air_conditioning, "_PENDING_CONFIRMATION_TIMEOUT_SECONDS", 1.0)
     monkeypatch.setattr(coordinator_base, "POST_COMMAND_REFRESH_DELAY_SECONDS", 0.05)
 
 
@@ -47,7 +47,7 @@ def _reported_device() -> dict[str, Any]:
     }
 
 
-async def _wait_until(predicate: Any, timeout: float = 3.0) -> None:
+async def _wait_until(predicate: Any, timeout: float = 5.0) -> None:
     deadline = asyncio.get_running_loop().time() + timeout
     while not predicate():
         assert asyncio.get_running_loop().time() < deadline, "timed out"

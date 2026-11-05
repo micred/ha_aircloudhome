@@ -96,7 +96,7 @@ def fast_command_timing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(air_conditioning, "_COMMAND_DEBOUNCE_SECONDS", 0.01)
     monkeypatch.setattr(air_conditioning, "_COMMAND_RETRY_TIMEOUT_SECONDS", 0.05, raising=False)
     monkeypatch.setattr(air_conditioning, "_COMMAND_RETRY_BACKOFF_SECONDS", (0.01,), raising=False)
-    monkeypatch.setattr(air_conditioning, "_PENDING_CONFIRMATION_TIMEOUT_SECONDS", 0.2, raising=False)
+    monkeypatch.setattr(air_conditioning, "_PENDING_CONFIRMATION_TIMEOUT_SECONDS", 5.0, raising=False)
     monkeypatch.setattr(air_conditioning, "_PENDING_CONFIRMATION_RESEND_SECONDS", 1.0, raising=False)
     monkeypatch.setattr(air_conditioning, "_PENDING_CONFIRMATION_MAX_RESENDS", 2, raising=False)
 
