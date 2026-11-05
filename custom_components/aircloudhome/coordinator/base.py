@@ -24,9 +24,10 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 if TYPE_CHECKING:
     from custom_components.aircloudhome.data import AirCloudHomeConfigEntry
 
-# The cloud needs a few seconds before idu-list reflects a control command, so
-# refreshing immediately would only fetch (and briefly show) the old state.
-POST_COMMAND_REFRESH_DELAY_SECONDS = 10.0
+# The cloud needs 10-20 seconds before idu-list reflects a control command
+# (measured on the global API), so refreshing earlier mostly fetches the old
+# state and makes the climate entity resend a command that was already fine.
+POST_COMMAND_REFRESH_DELAY_SECONDS = 20.0
 
 
 class AirCloudHomeDataUpdateCoordinator(DataUpdateCoordinator):

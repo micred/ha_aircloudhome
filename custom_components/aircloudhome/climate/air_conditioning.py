@@ -65,9 +65,12 @@ _OPTIMISTIC_OVERRIDE_TTL_SECONDS = 15.0
 _COMMAND_DEBOUNCE_SECONDS = 1.5
 _COMMAND_RETRY_TIMEOUT_SECONDS = 15.0
 _COMMAND_RETRY_BACKOFF_SECONDS = (1.0, 2.0, 4.0, 5.0)
-_PENDING_CONFIRMATION_TIMEOUT_SECONDS = 40.0
+# Confirmation is checked on the post-command refreshes (20 s apart): the first
+# one may trigger a resend, the second one is the last chance to confirm, and
+# the deadline leaves it ~10 s of slack before rolling back.
+_PENDING_CONFIRMATION_TIMEOUT_SECONDS = 50.0
 _PENDING_CONFIRMATION_RESEND_SECONDS = 10.0
-_PENDING_CONFIRMATION_MAX_RESENDS = 2
+_PENDING_CONFIRMATION_MAX_RESENDS = 1
 
 
 @dataclass

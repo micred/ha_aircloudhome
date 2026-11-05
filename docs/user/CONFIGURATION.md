@@ -159,9 +159,9 @@ The cloud API is slow to reflect commands and rejects commands sent while a prev
 1. **Immediate feedback:** the climate entity shows the new value right away; the action returns without waiting for the cloud.
 2. **Debounce:** changes made within 1.5 seconds (for example, clicking the temperature arrows several times) are merged into a single command.
 3. **Retry:** if the cloud answers "too many requests", the command is retried in the background for up to 15 seconds. A newer change replaces a command that is still being retried.
-4. **Confirmation:** the new value stays visible until the cloud reports it. If it still reports the old value, the command is re-sent (up to 2 times, 10 seconds apart). After 40 seconds without confirmation, the entity shows the cloud-reported state again and a warning is logged.
+4. **Confirmation:** the new value stays visible until the cloud reports it. If it still reports the old value, the command is sent once more. After 50 seconds without confirmation, the entity shows the cloud-reported state again and a warning is logged.
 
-About 10 seconds after the last command, one extra update is fetched so the entity reflects the confirmed state without waiting for the next poll.
+About 20 seconds after the last command, one extra update is fetched so the entity reflects the confirmed state without waiting for the next poll. The cloud usually needs 10–20 seconds to report a change.
 
 ## Diagnostic Data
 
